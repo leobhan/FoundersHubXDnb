@@ -238,10 +238,52 @@ static int cryCountOn(const bool* flags, int n) {
   return on;
 }
 
-static bool cryIsEpisode(const bool* flags, int n) {
-  return (float)cryCountOn(flags, n) / n >= CRY_EPISODE_FRACTION &&
-         cryBursts(flags, n, nullptr) >= CRY_EPISODE_MIN_BURSTS;
-}
+// One cry with its pauses, fed one frame at a time (features.py Episode).
+// step() and finish() return true when the episode gives a guess, with the
+// frames to fingerprint in [first, last].
+struct CryEpisode {
+  int32_t start = -1, last = -1;
+  int cry = 0;
+
+  void reset() {
+    start = last = -1;
+    cry = 0;
+  }
+  bool open() const { return start >= 0; }
+
+  bool step(int32_t i, bool flag, int32_t& first, int32_t& lastOut) {
+    if (start < 0) {
+      if (flag) {
+        start = last = i;
+        cry = 1;
+      }
+      return false;
+    }
+    if (flag) {
+      last = i;
+      cry++;
+      if (cry >= CRY_EPISODE_CRY_FRAMES) return close(true, first, lastOut);
+    } else if (i - last >= CRY_EPISODE_GAP_FRAMES) {
+      return close(cry >= CRY_EPISODE_MIN_CRY_FRAMES, first, lastOut);
+    }
+    return false;
+  }
+
+  // The recording ended: like the baby falling silent.
+  bool finish(int32_t& first, int32_t& lastOut) {
+    return close(start >= 0 && cry >= CRY_EPISODE_MIN_CRY_FRAMES, first, lastOut);
+  }
+
+ private:
+  bool close(bool give, int32_t& first, int32_t& lastOut) {
+    if (give) {
+      first = last - CRY_EPISODE_MAX_FRAMES + 1 > start ? last - CRY_EPISODE_MAX_FRAMES + 1 : start;
+      lastOut = last;
+    }
+    reset();
+    return give;
+  }
+};
 
 // numpy's default (linear) percentile. Sorts v in place.
 static float cryPercentile(float* v, int n, float q) {
@@ -259,9 +301,9 @@ static float cryPercentile(float* v, int n, float q) {
 
 // ---------- fingerprint ----------
 
-// Fingerprint of one window, oldest frame first. The device only calls this
-// after the detector fired; with fewer than 2 cry-like frames it uses every
-// frame (features.py uses the louder half there, for clips the detector missed).
+// Fingerprint of a run of frames (an episode), oldest first. An episode has
+// cry-like frames; with fewer than 2 this uses every frame (features.py uses the
+// louder half there, for clips the detector missed).
 static void cryFingerprint(const CryFrame* const* fr, const bool* flags, int n, float* fp) {
   bool all = cryCountOn(flags, n) < 2;
   int sel = 0;
@@ -306,12 +348,13 @@ static void cryFingerprint(const CryFrame* const* fr, const bool* flags, int n, 
 }
 
 // A recorded clip, as features.py clip_fingerprint() takes it: the floor starts
-// at a low percentile of the clip, the first window that passes is used, and
-// without one the window with the most cry-like frames. Returns 1 when the
-// detector fired, 0 for the fallback window, -1 when the clip is too short or
-// memory ran out. `frames` are the clip's frames, oldest first.
+// at a low percentile of the clip, the first episode that gives a guess is used
+// (the end of the clip counts as silence), and without one the
+// CRY_EPISODE_MAX_FRAMES run with the most cry-like frames. Returns 1 when the
+// detector gave a guess, 0 for the fallback, -1 when the clip is empty or memory
+// ran out. `frames` are the clip's frames, oldest first.
 static int cryClipFingerprintFrames(const CryFrame* frames, int nf, float* fp, float* cryFraction) {
-  if (nf < CRY_WINDOW_FRAMES) return -1;
+  if (nf < 1) return -1;
   bool* flags = (bool*)malloc(nf);
   float* dbs = (float*)malloc(nf * sizeof(float));
   if (!flags || !dbs) {
@@ -327,31 +370,31 @@ static int cryClipFingerprintFrames(const CryFrame* frames, int nf, float* fp, f
     on += flags[i];
     floorDb = cryFloorStep(floorDb, frames[i].db);
   }
-  int result = 0, end = -1;
-  for (int t = CRY_WINDOW_FRAMES - 1; t < nf && end < 0; t++) {
-    if (cryIsEpisode(flags + t - CRY_WINDOW_FRAMES + 1, CRY_WINDOW_FRAMES)) {
-      end = t;
-      result = 1;
-    }
-  }
-  if (end < 0) {
+  CryEpisode episode;
+  int32_t first = -1, last = -1;
+  bool given = false;
+  for (int i = 0; i < nf && !given; i++) given = episode.step(i, flags[i], first, last);
+  if (!given) given = episode.finish(first, last);
+  if (!given) {
+    int w = nf < CRY_EPISODE_MAX_FRAMES ? nf : CRY_EPISODE_MAX_FRAMES;
     int best = -1;
-    for (int s = 0; s + CRY_WINDOW_FRAMES <= nf; s++) {
-      int c = cryCountOn(flags + s, CRY_WINDOW_FRAMES);
+    for (int s = 0; s + w <= nf; s++) {
+      int c = cryCountOn(flags + s, w);
       if (c > best) {
         best = c;
-        end = s + CRY_WINDOW_FRAMES - 1;
+        first = s;
       }
     }
+    last = first + w - 1;
   }
-  const CryFrame* seq[CRY_WINDOW_FRAMES];
-  int first = end - CRY_WINDOW_FRAMES + 1;
-  for (int i = 0; i < CRY_WINDOW_FRAMES; i++) seq[i] = &frames[first + i];
-  cryFingerprint(seq, flags + first, CRY_WINDOW_FRAMES, fp);
+  static const CryFrame* seq[CRY_EPISODE_MAX_FRAMES];
+  int n = last - first + 1;
+  for (int i = 0; i < n; i++) seq[i] = &frames[first + i];
+  cryFingerprint(seq, flags + first, n, fp);
   if (cryFraction) *cryFraction = (float)on / nf;
   free(flags);
   free(dbs);
-  return result;
+  return given ? 1 : 0;
 }
 
 // ---------- self-test signal ----------

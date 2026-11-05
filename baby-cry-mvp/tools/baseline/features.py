@@ -13,7 +13,7 @@ import math
 
 import numpy as np
 
-FEATURE_VERSION = 1
+FEATURE_VERSION = 2
 
 FS_IN = 16000                   # device microphone
 FS = 8000                       # pipeline rate
@@ -34,12 +34,19 @@ OCTAVE_TOL = 0.9                # shortest lag whose peak is within 90 % of the 
 # Cry detector
 LOUD_DB = 15.0                  # a frame must be this far above the noise floor
 FLOOR_RISE_DB = 0.01            # per frame (about 0.3 dB/s); the floor falls at once
-FLOOR_INIT_PERCENTILE = 10.0    # clips only: the device starts from its first frame
+FLOOR_INIT_PERCENTILE = 10.0    # clips only: the device starts from its first second
 VOICING_MIN = 0.6
 FLATNESS_MAX = 0.3
-WINDOW_FRAMES = 94              # 3 s
-EPISODE_FRACTION = 0.5
-EPISODE_MIN_BURSTS = 2
+
+# A cry episode starts at the first cry-like frame and survives pauses. It gives
+# a guess as soon as it holds EPISODE_CRY_FRAMES cry-like frames, or, when the
+# baby falls silent for EPISODE_GAP_FRAMES, if it held at least
+# EPISODE_MIN_CRY_FRAMES. The fingerprint covers the episode up to its last
+# cry-like frame, at most EPISODE_MAX_FRAMES long.
+EPISODE_CRY_FRAMES = 47         # 1.5 s of crying, pauses not counted
+EPISODE_MIN_CRY_FRAMES = 16     # 0.5 s
+EPISODE_GAP_FRAMES = 94         # 3 s of silence ends it
+EPISODE_MAX_FRAMES = 188        # 6 s
 BURST_MIN_FRAMES = 4            # cry-like frames in a burst (128 ms)
 BURST_GAP_FRAMES = 2            # a burst survives this many non-cry frames
 
@@ -195,16 +202,55 @@ def bursts(flags):
     return out
 
 
-def is_episode(flags):
-    return np.mean(flags) >= EPISODE_FRACTION and len(bursts(flags)) >= EPISODE_MIN_BURSTS
+class Episode:
+    """One cry with its pauses, fed one frame at a time (CryEpisode in cry_dsp.h).
+
+    step() and finish() return the (first, last) frames to fingerprint when the
+    episode gives a guess, else None.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.start = self.last = None
+        self.cry = 0
+
+    def _span(self):
+        return max(self.start, self.last - EPISODE_MAX_FRAMES + 1), self.last
+
+    def step(self, i, flag):
+        if self.start is None:
+            if flag:
+                self.start = self.last = i
+                self.cry = 1
+            return None
+        if flag:
+            self.last = i
+            self.cry += 1
+            if self.cry >= EPISODE_CRY_FRAMES:
+                span = self._span()
+                self.reset()
+                return span
+        elif i - self.last >= EPISODE_GAP_FRAMES:
+            span = self._span() if self.cry >= EPISODE_MIN_CRY_FRAMES else None
+            self.reset()
+            return span
+        return None
+
+    def finish(self):
+        """The recording ended: treat it like the baby falling silent."""
+        span = self._span() if self.start is not None and self.cry >= EPISODE_MIN_CRY_FRAMES else None
+        self.reset()
+        return span
 
 
 def fingerprint(feats, flags):
-    """The N_FEATURES fingerprint of one WINDOW_FRAMES window."""
+    """The N_FEATURES fingerprint of a run of frames (an episode)."""
     sel = np.asarray(flags, dtype=bool)
     if sel.sum() < 2:
-        # Clips only: the device fingerprints a window after the detector fired,
-        # so it never gets here (cry_dsp.h falls back to every frame instead).
+        # Clips only: the device fingerprints an episode, which has cry-like
+        # frames, so it never gets here (cry_dsp.h falls back to every frame).
         sel = feats["db"] >= np.median(feats["db"])
     bands = feats["bands"][sel]
     f0 = feats["f0_hz"][sel]
@@ -262,26 +308,31 @@ def clip_fingerprint(x8):
     """Fingerprint of a recorded clip at 8 kHz, as the device would take it.
 
     The noise floor starts at a low percentile of the clip's own frames, since a
-    clip has no minutes of room sound before it. The detector then streams over
-    the clip and the first window that passes is fingerprinted. When none passes,
-    the window with the most cry-like frames is used and `triggered` is False.
-    Returns (fingerprint, triggered, cry_fraction_of_clip).
+    clip has no minutes of room sound before it. The first episode that gives a
+    guess is fingerprinted; the end of the clip counts as the baby falling
+    silent. Without one, the EPISODE_MAX_FRAMES run with the most cry-like frames
+    is used and `triggered` is False. Returns (fingerprint, triggered, cry_fraction_of_clip).
     """
     x8 = np.asarray(x8, dtype=np.float64)
     n = len(x8) // FRAME
-    if n < WINDOW_FRAMES:
-        raise ValueError(f"clip shorter than {WINDOW_FRAMES * FRAME / FS:.1f} s")
+    if n < 1:
+        raise ValueError("clip shorter than one frame")
     feats = frame_features(x8[: n * FRAME].reshape(n, FRAME))
     flags = cry_like(feats, percentile(feats["db"], FLOOR_INIT_PERCENTILE))
 
-    def window(t):
-        sl = slice(t - WINDOW_FRAMES + 1, t + 1)
+    def run(first, last):
+        sl = slice(first, last + 1)
         return {k: v[sl] for k, v in feats.items()}, flags[sl]
 
-    for t in range(WINDOW_FRAMES - 1, n):
-        wf, wl = window(t)
-        if is_episode(wl):
-            return fingerprint(wf, wl), True, float(np.mean(flags))
-    counts = np.convolve(flags.astype(int), np.ones(WINDOW_FRAMES, dtype=int), mode="valid")
-    wf, wl = window(int(np.argmax(counts)) + WINDOW_FRAMES - 1)
-    return fingerprint(wf, wl), False, float(np.mean(flags))
+    episode = Episode()
+    for i in range(n):
+        span = episode.step(i, flags[i])
+        if span:
+            return fingerprint(*run(*span)), True, float(np.mean(flags))
+    span = episode.finish()
+    if span:
+        return fingerprint(*run(*span)), True, float(np.mean(flags))
+    w = min(EPISODE_MAX_FRAMES, n)
+    counts = np.convolve(flags.astype(int), np.ones(w, dtype=int), mode="valid")
+    first = int(np.argmax(counts))
+    return fingerprint(*run(first, first + w - 1)), False, float(np.mean(flags))

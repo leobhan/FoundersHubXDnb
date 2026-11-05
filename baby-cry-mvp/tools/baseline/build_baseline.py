@@ -267,8 +267,14 @@ def by_position(sim, cap=4):
 
 # ---------- header ----------
 
+def c_float(v):
+    """A C float literal: 2 -> 2.0f (2f does not compile)."""
+    text = f"{v:.9g}"
+    return text + ("f" if any(ch in text for ch in ".en") else ".0f")
+
+
 def c_floats(values, per_line=6):
-    vals = [f"{v:.9g}f" for v in np.ravel(values)]
+    vals = [c_float(v) for v in np.ravel(values)]
     return ",\n".join("    " + ", ".join(vals[i:i + per_line]) for i in range(0, len(vals), per_line))
 
 
@@ -310,9 +316,10 @@ def write_header(path, model, report):
 #define CRY_FLOOR_INIT_PERCENTILE {fx.FLOOR_INIT_PERCENTILE}f
 #define CRY_VOICING_MIN {fx.VOICING_MIN}f
 #define CRY_FLATNESS_MAX {fx.FLATNESS_MAX}f
-#define CRY_WINDOW_FRAMES {fx.WINDOW_FRAMES}
-#define CRY_EPISODE_FRACTION {fx.EPISODE_FRACTION}f
-#define CRY_EPISODE_MIN_BURSTS {fx.EPISODE_MIN_BURSTS}
+#define CRY_EPISODE_CRY_FRAMES {fx.EPISODE_CRY_FRAMES}
+#define CRY_EPISODE_MIN_CRY_FRAMES {fx.EPISODE_MIN_CRY_FRAMES}
+#define CRY_EPISODE_GAP_FRAMES {fx.EPISODE_GAP_FRAMES}
+#define CRY_EPISODE_MAX_FRAMES {fx.EPISODE_MAX_FRAMES}
 #define CRY_BURST_MIN_FRAMES {fx.BURST_MIN_FRAMES}
 #define CRY_BURST_GAP_FRAMES {fx.BURST_GAP_FRAMES}
 #define CRY_DECIM_TAPS {fx.DECIM_TAPS}
@@ -339,10 +346,10 @@ static const uint8_t CRY_BAND_END[CRY_N_BANDS] = {{{c_ints(end)}}};
 // ---- classifier (tools/baseline/build_baseline.py) ----
 #define CRY_N_NEEDS {len(NEEDS)}
 enum CryNeed : uint8_t {{ {", ".join(f"NEED_{n.upper()} = {i}" for i, n in enumerate(NEEDS))} }};
-static const float CRY_PRIOR[CRY_N_NEEDS] = {{{", ".join(f"{p:.9g}f" for p in PRIOR)}}};
+static const float CRY_PRIOR[CRY_N_NEEDS] = {{{", ".join(c_float(p) for p in PRIOR)}}};
 #define CRY_BASELINE_WEIGHT {BASELINE_WEIGHT}f
-#define CRY_KERNEL_SIGMA {model.sigma:.9g}f
-#define CRY_FLAT_LIKELIHOOD {model.flat:.9g}f
+#define CRY_KERNEL_SIGMA {c_float(model.sigma)}
+#define CRY_FLAT_LIKELIHOOD {c_float(model.flat)}
 
 // z = (fingerprint - mean) / std
 static const float CRY_FEAT_MEAN[CRY_N_FEATURES] = {{

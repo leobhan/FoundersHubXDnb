@@ -154,10 +154,11 @@ code:
       screen.print(text);
     }
 
-    // What the listening screen says under its title.
+    // What the listening screen shows, as a number that changes when it should redraw:
+    // 0 listening, 1 waiting for quiet, 2..12 hearing a cry (its progress in tenths).
     static int listeningHint() {
-      if (cry.quietFrames < 16) return 1;   // a cry-like frame in the last 0.5 s
-      if (!cry.isArmed()) return 2;
+      if (cry.hearing()) return 2 + min(10, cry.heardFrames() * 10 / CRY_EPISODE_CRY_FRAMES);
+      if (!cry.isArmed()) return 1;
       return 0;
     }
 
@@ -170,12 +171,21 @@ code:
 
       switch (ui) {
         case UI_LISTENING: {
+          int hint = listeningHint();
+          if (hint >= 2) {
+            // Stays up through the pauses in a cry; the bar fills as crying is heard.
+            drawText(2, 20, 2, ST7735_TFT::COLOR_ORANGE, "Hearing a cry");
+            drawText(2, 44, 1, UI_GREY, "Pauses are fine. The");
+            drawText(2, 54, 1, UI_GREY, "guess comes when ready.");
+            int w = screen.width() - 4;
+            screen.drawRect(2, 68, w, 8, UI_GREY);
+            screen.fillRect(2, 68, w * (hint - 2) / 10, 8, ST7735_TFT::COLOR_ORANGE);
+            break;
+          }
           drawText(2, 20, 2, ST7735_TFT::COLOR_WHITE, "Listening");
           drawText(2, 44, 1, UI_GREY, "A guess appears when");
           drawText(2, 54, 1, UI_GREY, "the baby cries.");
-          int hint = listeningHint();
-          if (hint == 1) drawText(2, 70, 1, ST7735_TFT::COLOR_ORANGE, "Hearing a cry...");
-          if (hint == 2) drawText(2, 70, 1, UI_GREY, "Next guess after quiet");
+          if (hint == 1) drawText(2, 70, 1, UI_GREY, "Next guess after quiet");
           break;
         }
         case UI_CRY_HEARD:
@@ -325,9 +335,10 @@ code:
       lastDebug = now;
       eventStart("cry_debug");
       Serial.printf("{\"db\":%.1f,\"floor\":%.1f,\"f0\":%.0f,\"voicing\":%.2f,\"flatness\":%.3f,\"cry\":%d,"
-                    "\"window\":%.2f,\"bursts\":%d,\"armed\":%d,\"overruns\":%lu}",
+                    "\"heard\":%d,\"quiet_s\":%.1f,\"armed\":%d,\"overruns\":%lu}",
                     cry.last.db, cry.floorDb, cry.last.f0, cry.last.voicing, cry.last.flatness, cry.lastCry ? 1 : 0,
-                    cry.windowFraction(), cry.windowBursts(), cry.isArmed() ? 1 : 0, (unsigned long)cry.overruns);
+                    cry.hearing() ? cry.heardFrames() : -1, cry.quietFrames * CRY_FRAME / (float)CRY_FS,
+                    cry.isArmed() ? 1 : 0, (unsigned long)cry.overruns);
       eventEnd();
     }
 

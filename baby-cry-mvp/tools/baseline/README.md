@@ -3,7 +3,7 @@
 How the board turns sound into a guess, and where the starting knowledge comes from.
 
 ```
-mic 16 kHz -> decimate to 8 kHz -> 32 ms frames -> cry detector -> 3 s fingerprint (38 numbers)
+mic 16 kHz -> decimate to 8 kHz -> 32 ms frames -> cry detector -> episode fingerprint (38 numbers, pauses allowed)
            -> prior x [Donate-a-Cry prototypes + this baby's confirmed cries] -> Hungry / Sleepy / Diaper / Discomfort
 ```
 
@@ -34,7 +34,7 @@ fingerprint, bump `FEATURE_VERSION`, so the board drops cries saved with the old
 
 The full report is at the top of `cry/baseline_cries.h`. In short:
 
-- **Detector:** it fires on 63 % of the Donate-a-Cry clips, and every clip is a cry. On the board
+- **Detector:** it fires on 96 % of the Donate-a-Cry clips, and every clip is a cry. On the board
   the noise floor comes from the room, so this is only a rough guide. Tune it with
   `atech monitor --key cry_debug`.
 - **Need, unseen babies:** 33 % balanced accuracy over Hungry, Sleepy and Discomfort, which is
@@ -64,7 +64,7 @@ the attribution there.
 
 | Event / action | What it carries |
 |---|---|
-| `cry_debug` (event, 4 Hz) | Frame level, noise floor, pitch, voicing, whether the frame is cry-like, the 3 s window. |
+| `cry_debug` (event, 4 Hz) | Frame level, noise floor, pitch, voicing, whether the frame is cry-like, how much of the current cry was heard. |
 | `cry_guess` (event) | The four probabilities when a cry is heard. |
 | `cry_saved` (event) | The confirmed need and the fingerprint. Collect these: they are this baby's real labelled data. |
 | `cry_store` (event, at boot) | Whether flash is mounted, and how many cries are saved. |

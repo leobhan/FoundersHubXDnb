@@ -29,6 +29,9 @@ static void cryOnMic(const int16_t* samples, int count, void*) {
 
 // ---------- live detector ----------
 
+// Frames kept: a whole episode plus the silence that ends it.
+#define CRY_HISTORY_FRAMES (CRY_EPISODE_MAX_FRAMES + CRY_EPISODE_GAP_FRAMES + 1)
+
 class CryListener {
  public:
   float fp[CRY_N_FEATURES];   // fingerprint of the last episode
@@ -45,7 +48,7 @@ class CryListener {
   }
 
   // Processes up to maxFrames frames of waiting audio. Returns true once when
-  // a cry episode is heard while `listening` and armed; the fingerprint is then in fp.
+  // a cry episode gives a guess while `listening` and armed; the fingerprint is then in fp.
   bool pump(bool listening, int maxFrames = 8) {
     uint32_t head = cryRingHead;
     __sync_synchronize();
@@ -71,45 +74,37 @@ class CryListener {
   }
 
   // After a guess: wait for quiet before the next one, so one long cry gives one guess.
-  void disarm() { armed = false; }
+  void disarm() {
+    armed = false;
+    episode.reset();
+  }
   bool isArmed() const { return armed; }
+
+  // A cry is being heard and its guess is still to come; pauses keep it going.
+  // A burst's worth of cry-like frames first, so a single odd frame does not show.
+  bool hearing() const { return episode.open() && episode.cry >= CRY_BURST_MIN_FRAMES; }
+  // Cry-like frames so far, against the CRY_EPISODE_CRY_FRAMES that give a guess at once.
+  int heardFrames() const { return episode.cry; }
 
   // Drops audio that piled up while loop was busy (the self-test).
   void skipBacklog() { tail = cryRingHead; }
-
-  // Share of cry-like frames and bursts in the current 3 s window.
-  float windowFraction() const { return count ? (float)cryCountOn(flag, count) / count : 0.0f; }
-  int windowBursts() {
-    const CryFrame* seq[CRY_WINDOW_FRAMES];
-    bool fl[CRY_WINDOW_FRAMES];
-    ordered(seq, fl);
-    return cryBursts(fl, count, nullptr);
-  }
 
  private:
   uint32_t tail = 0;
   CryDecimator dec;
   float frameBuf[CRY_FRAME];
   int fill = 0;
-  CryFrame win[CRY_WINDOW_FRAMES];
-  bool flag[CRY_WINDOW_FRAMES];
-  int pos = 0, count = 0;
+  CryFrame hist[CRY_HISTORY_FRAMES];
+  bool histCry[CRY_HISTORY_FRAMES];
+  int32_t frameNo = 0;
   float initDb[CRY_FLOOR_INIT_FRAMES];
   int initCount = 0;
   bool armed = true;
-
-  // The window, oldest frame first.
-  void ordered(const CryFrame** seq, bool* fl) {
-    int first = count < CRY_WINDOW_FRAMES ? 0 : pos;
-    for (int i = 0; i < count; i++) {
-      int k = (first + i) % CRY_WINDOW_FRAMES;
-      seq[i] = &win[k];
-      fl[i] = flag[k];
-    }
-  }
+  CryEpisode episode;
 
   bool onFrame(bool listening) {
-    CryFrame f;
+    int32_t i = frameNo++;
+    CryFrame& f = hist[i % CRY_HISTORY_FRAMES];
     cryFrameFeatures(frameBuf, f);
     bool c = false;
     if (!floorReady) {
@@ -122,21 +117,26 @@ class CryListener {
       c = cryIsCryLike(f, floorDb);
       floorDb = cryFloorStep(floorDb, f.db);
     }
-    win[pos] = f;
-    flag[pos] = c;
-    pos = (pos + 1) % CRY_WINDOW_FRAMES;
-    if (count < CRY_WINDOW_FRAMES) count++;
+    histCry[i % CRY_HISTORY_FRAMES] = c;
     last = f;
     lastCry = c;
     quietFrames = c ? 0 : quietFrames + 1;
     if (!armed && quietFrames >= CRY_REARM_FRAMES) armed = true;
 
-    if (!listening || !armed || count < CRY_WINDOW_FRAMES) return false;
-    const CryFrame* seq[CRY_WINDOW_FRAMES];
-    bool fl[CRY_WINDOW_FRAMES];
-    ordered(seq, fl);
-    if (!cryIsEpisode(fl, CRY_WINDOW_FRAMES)) return false;
-    cryFingerprint(seq, fl, CRY_WINDOW_FRAMES, fp);
+    if (!listening || !armed) {
+      episode.reset();
+      return false;
+    }
+    int32_t first, end;
+    if (!episode.step(i, c, first, end)) return false;
+    static const CryFrame* seq[CRY_EPISODE_MAX_FRAMES];
+    static bool fl[CRY_EPISODE_MAX_FRAMES];
+    int n = end - first + 1;
+    for (int k = 0; k < n; k++) {
+      seq[k] = &hist[(first + k) % CRY_HISTORY_FRAMES];
+      fl[k] = histCry[(first + k) % CRY_HISTORY_FRAMES];
+    }
+    cryFingerprint(seq, fl, n, fp);
     return true;
   }
 };

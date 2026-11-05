@@ -17,7 +17,7 @@ to use the SDK (same text as `atech guide`).
 
 ## What it does
 
-When the baby has cried for about 3 s, the screen shows a guess (Hungry, Sleepy,
+When the baby has cried for about 1.5 s (pauses do not count), or stops after at least 0.5 s, the screen shows a guess (Hungry, Sleepy,
 Diaper or Discomfort) with how sure it is.
 
 - **Green button:** the guess was right. The cry is saved in flash for this baby,

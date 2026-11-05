@@ -89,35 +89,42 @@ code:
     \ is built) ----\n\nstatic void drawText(int x, int y, uint8_t size, uint16_t\
     \ color, const char* text) {\n  screen.setTextSize(size);\n  screen.setTextColor(color);\n\
     \  screen.setCursor(x, y);\n  screen.print(text);\n}\n\n// What the listening\
-    \ screen says under its title.\nstatic int listeningHint() {\n  if (cry.quietFrames\
-    \ < 16) return 1;   // a cry-like frame in the last 0.5 s\n  if (!cry.isArmed())\
-    \ return 2;\n  return 0;\n}\n\nstatic void drawUi() {\n  char buf[32];\n  screen.clear();\n\
-    \  drawText(2, 1, 1, ST7735_TFT::COLOR_WHITE, \"Nattlys\");\n  snprintf(buf, sizeof(buf),\
-    \ \"%d learned\", store.count);\n  drawText(screen.width() - 2 - 6 * (int)strlen(buf),\
-    \ 1, 1, UI_GREY, buf);\n\n  switch (ui) {\n    case UI_LISTENING: {\n      drawText(2,\
+    \ screen shows, as a number that changes when it should redraw:\n// 0 listening,\
+    \ 1 waiting for quiet, 2..12 hearing a cry (its progress in tenths).\nstatic int\
+    \ listeningHint() {\n  if (cry.hearing()) return 2 + min(10, cry.heardFrames()\
+    \ * 10 / CRY_EPISODE_CRY_FRAMES);\n  if (!cry.isArmed()) return 1;\n  return 0;\n\
+    }\n\nstatic void drawUi() {\n  char buf[32];\n  screen.clear();\n  drawText(2,\
+    \ 1, 1, ST7735_TFT::COLOR_WHITE, \"Nattlys\");\n  snprintf(buf, sizeof(buf), \"\
+    %d learned\", store.count);\n  drawText(screen.width() - 2 - 6 * (int)strlen(buf),\
+    \ 1, 1, UI_GREY, buf);\n\n  switch (ui) {\n    case UI_LISTENING: {\n      int\
+    \ hint = listeningHint();\n      if (hint >= 2) {\n        // Stays up through\
+    \ the pauses in a cry; the bar fills as crying is heard.\n        drawText(2,\
+    \ 20, 2, ST7735_TFT::COLOR_ORANGE, \"Hearing a cry\");\n        drawText(2, 44,\
+    \ 1, UI_GREY, \"Pauses are fine. The\");\n        drawText(2, 54, 1, UI_GREY,\
+    \ \"guess comes when ready.\");\n        int w = screen.width() - 4;\n       \
+    \ screen.drawRect(2, 68, w, 8, UI_GREY);\n        screen.fillRect(2, 68, w * (hint\
+    \ - 2) / 10, 8, ST7735_TFT::COLOR_ORANGE);\n        break;\n      }\n      drawText(2,\
     \ 20, 2, ST7735_TFT::COLOR_WHITE, \"Listening\");\n      drawText(2, 44, 1, UI_GREY,\
     \ \"A guess appears when\");\n      drawText(2, 54, 1, UI_GREY, \"the baby cries.\"\
-    );\n      int hint = listeningHint();\n      if (hint == 1) drawText(2, 70, 1,\
-    \ ST7735_TFT::COLOR_ORANGE, \"Hearing a cry...\");\n      if (hint == 2) drawText(2,\
-    \ 70, 1, UI_GREY, \"Next guess after quiet\");\n      break;\n    }\n    case\
-    \ UI_CRY_HEARD:\n      drawText(2, 20, 2, ST7735_TFT::COLOR_WHITE, \"Crying heard\"\
-    );\n      snprintf(buf, sizeof(buf), \"Comparing with %d\", store.count);\n  \
-    \    drawText(2, 44, 1, UI_GREY, buf);\n      drawText(2, 54, 1, UI_GREY, store.count\
-    \ == 1 ? \"saved cry\" : \"saved cries\");\n      break;\n    case UI_GUESS: {\n\
-    \      drawText(2, 12, 1, UI_GREY, rejected ? \"THEN MAYBE...\" : \"BEST GUESS\"\
-    );\n      drawText(2, 22, 2, NEED_COLOR[shown], NEED_NAME[shown]);\n      snprintf(buf,\
-    \ sizeof(buf), \"%d%% sure\", percentOf(shown));\n      drawText(2, 40, 1, NEED_COLOR[shown],\
-    \ buf);\n      drawText(2, 50, 1, ST7735_TFT::COLOR_WHITE, NEED_HINT[shown]);\n\
-    \      int x = 2;\n      for (int c = 0; c < CRY_N_NEEDS; c++) {\n        if (c\
-    \ == shown) continue;\n        if (rejected & (1 << c)) snprintf(buf, sizeof(buf),\
-    \ \"%s x \", NEED_SHORT[c]);\n        else snprintf(buf, sizeof(buf), \"%s %d%%\
-    \ \", NEED_SHORT[c], percentOf(c));\n        drawText(x, 60, 1, (rejected & (1\
-    \ << c)) ? UI_GREY : NEED_COLOR[c], buf);\n        x += 6 * strlen(buf);\n   \
-    \   }\n      drawText(2, 71, 1, UI_GREY, \"Right? green yes, red no\");\n    \
-    \  break;\n    }\n    case UI_GOT_IT:\n      drawText(2, 12, 1, UI_GREY, \"GOT\
-    \ IT\");\n      drawText(2, 22, 2, NEED_COLOR[shown], NEED_NAME[shown]);\n   \
-    \   drawText(2, 44, 1, ST7735_TFT::COLOR_WHITE, \"Thanks! I know the\");\n   \
-    \   drawText(2, 54, 1, ST7735_TFT::COLOR_WHITE, \"baby a little better.\");\n\
+    );\n      if (hint == 1) drawText(2, 70, 1, UI_GREY, \"Next guess after quiet\"\
+    );\n      break;\n    }\n    case UI_CRY_HEARD:\n      drawText(2, 20, 2, ST7735_TFT::COLOR_WHITE,\
+    \ \"Crying heard\");\n      snprintf(buf, sizeof(buf), \"Comparing with %d\",\
+    \ store.count);\n      drawText(2, 44, 1, UI_GREY, buf);\n      drawText(2, 54,\
+    \ 1, UI_GREY, store.count == 1 ? \"saved cry\" : \"saved cries\");\n      break;\n\
+    \    case UI_GUESS: {\n      drawText(2, 12, 1, UI_GREY, rejected ? \"THEN MAYBE...\"\
+    \ : \"BEST GUESS\");\n      drawText(2, 22, 2, NEED_COLOR[shown], NEED_NAME[shown]);\n\
+    \      snprintf(buf, sizeof(buf), \"%d%% sure\", percentOf(shown));\n      drawText(2,\
+    \ 40, 1, NEED_COLOR[shown], buf);\n      drawText(2, 50, 1, ST7735_TFT::COLOR_WHITE,\
+    \ NEED_HINT[shown]);\n      int x = 2;\n      for (int c = 0; c < CRY_N_NEEDS;\
+    \ c++) {\n        if (c == shown) continue;\n        if (rejected & (1 << c))\
+    \ snprintf(buf, sizeof(buf), \"%s x \", NEED_SHORT[c]);\n        else snprintf(buf,\
+    \ sizeof(buf), \"%s %d%% \", NEED_SHORT[c], percentOf(c));\n        drawText(x,\
+    \ 60, 1, (rejected & (1 << c)) ? UI_GREY : NEED_COLOR[c], buf);\n        x +=\
+    \ 6 * strlen(buf);\n      }\n      drawText(2, 71, 1, UI_GREY, \"Right? green\
+    \ yes, red no\");\n      break;\n    }\n    case UI_GOT_IT:\n      drawText(2,\
+    \ 12, 1, UI_GREY, \"GOT IT\");\n      drawText(2, 22, 2, NEED_COLOR[shown], NEED_NAME[shown]);\n\
+    \      drawText(2, 44, 1, ST7735_TFT::COLOR_WHITE, \"Thanks! I know the\");\n\
+    \      drawText(2, 54, 1, ST7735_TFT::COLOR_WHITE, \"baby a little better.\");\n\
     \      drawText(2, 70, 1, UI_GREY, savedToFlash ? \"Saved to the baby's cries\"\
     \ : \"Kept until power-off\");\n      break;\n    case UI_NOT_SAVED:\n      drawText(2,\
     \ 12, 1, UI_GREY, \"NOT SAVED\");\n      drawText(2, 22, 2, ST7735_TFT::COLOR_WHITE,\
@@ -186,11 +193,12 @@ code:
     \  redLight.clear();\n  redLight.show();\n  lightOn = false;\n}\n\nif (now - lastDebug\
     \ >= 250) {\n  lastDebug = now;\n  eventStart(\"cry_debug\");\n  Serial.printf(\"\
     {\\\"db\\\":%.1f,\\\"floor\\\":%.1f,\\\"f0\\\":%.0f,\\\"voicing\\\":%.2f,\\\"\
-    flatness\\\":%.3f,\\\"cry\\\":%d,\"\n                \"\\\"window\\\":%.2f,\\\"\
-    bursts\\\":%d,\\\"armed\\\":%d,\\\"overruns\\\":%lu}\",\n                cry.last.db,\
+    flatness\\\":%.3f,\\\"cry\\\":%d,\"\n                \"\\\"heard\\\":%d,\\\"quiet_s\\\
+    \":%.1f,\\\"armed\\\":%d,\\\"overruns\\\":%lu}\",\n                cry.last.db,\
     \ cry.floorDb, cry.last.f0, cry.last.voicing, cry.last.flatness, cry.lastCry ?\
-    \ 1 : 0,\n                cry.windowFraction(), cry.windowBursts(), cry.isArmed()\
-    \ ? 1 : 0, (unsigned long)cry.overruns);\n  eventEnd();\n}\n\nif (ui == UI_LISTENING\
-    \ && listeningHint() != lastHint) {\n  lastHint = listeningHint();\n  uiDirty\
-    \ = true;\n}\nif (uiDirty && now - lastDraw >= 250) {\n  lastDraw = now;\n  uiDirty\
-    \ = false;\n  drawUi();\n}\n"
+    \ 1 : 0,\n                cry.hearing() ? cry.heardFrames() : -1, cry.quietFrames\
+    \ * CRY_FRAME / (float)CRY_FS,\n                cry.isArmed() ? 1 : 0, (unsigned\
+    \ long)cry.overruns);\n  eventEnd();\n}\n\nif (ui == UI_LISTENING && listeningHint()\
+    \ != lastHint) {\n  lastHint = listeningHint();\n  uiDirty = true;\n}\nif (uiDirty\
+    \ && now - lastDraw >= 250) {\n  lastDraw = now;\n  uiDirty = false;\n  drawUi();\n\
+    }\n"
