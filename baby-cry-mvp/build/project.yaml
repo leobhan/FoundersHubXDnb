@@ -4,13 +4,16 @@ modules:
 - id: neopixel
   instance: greenLight
   port: port_1
+- id: button
+  instance: correctButton
+  port: port_2
 - id: st7735_tft
   instance: screen
   ports:
   - port_3
   - port_4
 - id: button
-  instance: button
+  instance: wrongButton
   port: port_5
 - id: neopixel
   instance: redLight
@@ -41,27 +44,27 @@ code:
 
     '
   loop: "static unsigned long lastDraw = 0;\nstatic int previousLevelBucket = -1;\n\
-    \nAtechGesture gesture = button.getGesture();\nif (gesture == GESTURE_TAP) {\n\
-    \  feedbackCorrect++;\n  greenLight.setAll(0, 255, 0);\n  greenLight.show();\n\
-    \  redLight.clear();\n  redLight.show();\n} else if (gesture == GESTURE_LONG_PRESS)\
-    \ {\n  feedbackIncorrect++;\n  redLight.setAll(255, 0, 0);\n  redLight.show();\n\
-    \  greenLight.clear();\n  greenLight.show();\n}\n\nif (millis() - lastDraw >=\
-    \ 250) {\n  lastDraw = millis();\n  int level = mic.getSoundLevel();\n  if (level\
-    \ < 0) level = 0;\n  if (level > 32767) level = 32767;\n\n  // Initial MVP heuristic:\
-    \ high microphone energy maps to a cry-like signal.\n  // This is not a trained\
-    \ baby-cry classifier.\n  const int threshold = 4500;\n  bool cryLike = level\
-    \ >= threshold;\n  int distance = level >= threshold ? level - threshold : threshold\
-    \ - level;\n  int confidence = 55 + (distance * 40 / 12000);\n  if (confidence\
-    \ > 95) confidence = 95;\n  if (confidence < 55) confidence = 55;\n\n  screen.clear();\n\
-    \  screen.setTextColor(ST7735_TFT::COLOR_WHITE);\n  screen.setTextSize(1);\n \
-    \ screen.setCursor(4, 4);\n  screen.print(\"BABY CRY MVP - HEURISTIC\");\n\n \
-    \ screen.setTextSize(2);\n  screen.setCursor(4, 25);\n  screen.print(cryLike ?\
-    \ \"CRY-LIKE\" : \"NOT CRY\");\n\n  screen.setTextSize(1);\n  screen.setCursor(4,\
-    \ 52);\n  screen.print(\"Probability: \");\n  screen.print(confidence);\n  screen.print(\"\
-    %\");\n\n  screen.setCursor(105, 52);\n  screen.print(\"OK:\");\n  screen.print(feedbackCorrect);\n\
-    \  screen.setCursor(105, 68);\n  screen.print(\"BAD:\");\n  screen.print(feedbackIncorrect);\n\
-    \  screen.display();\n\n  if (previousLevelBucket != level / 1000) {\n    previousLevelBucket\
-    \ = level / 1000;\n    Serial.printf(\"{\\\"type\\\":\\\"event\\\",\\\"payload\\\
-    \":{\\\"event_type\\\":\\\"sensor\\\",\\\"key\\\":\\\"baby_cry_prediction\\\"\
-    ,\\\"value\\\":{\\\"cry_like\\\":%s,\\\"confidence\\\":%d,\\\"level\\\":%d}}}\\\
-    n\", cryLike ? \"true\" : \"false\", confidence, level);\n  }\n}\n"
+    \nif (correctButton.wasPressed()) {\n  feedbackCorrect++;\n  greenLight.setAll(0,\
+    \ 255, 0);\n  greenLight.show();\n  redLight.clear();\n  redLight.show();\n} else\
+    \ if (wrongButton.wasPressed()) {\n  feedbackIncorrect++;\n  redLight.setAll(255,\
+    \ 0, 0);\n  redLight.show();\n  greenLight.clear();\n  greenLight.show();\n}\n\
+    \nif (millis() - lastDraw >= 250) {\n  lastDraw = millis();\n  int level = mic.getSoundLevel();\n\
+    \  if (level < 0) level = 0;\n  if (level > 32767) level = 32767;\n\n  // Initial\
+    \ MVP heuristic: high microphone energy maps to a cry-like signal.\n  // This\
+    \ is not a trained baby-cry classifier.\n  const int threshold = 4500;\n  bool\
+    \ cryLike = level >= threshold;\n  int distance = level >= threshold ? level -\
+    \ threshold : threshold - level;\n  int confidence = 55 + (distance * 40 / 12000);\n\
+    \  if (confidence > 95) confidence = 95;\n  if (confidence < 55) confidence =\
+    \ 55;\n\n  screen.clear();\n  screen.setTextColor(ST7735_TFT::COLOR_WHITE);\n\
+    \  screen.setTextSize(1);\n  screen.setCursor(4, 4);\n  screen.print(\"BABY CRY\
+    \ MVP - HEURISTIC\");\n\n  screen.setTextSize(2);\n  screen.setCursor(4, 25);\n\
+    \  screen.print(cryLike ? \"CRY-LIKE\" : \"NOT CRY\");\n\n  screen.setTextSize(1);\n\
+    \  screen.setCursor(4, 52);\n  screen.print(\"Probability: \");\n  screen.print(confidence);\n\
+    \  screen.print(\"%\");\n\n  screen.setCursor(105, 52);\n  screen.print(\"OK:\"\
+    );\n  screen.print(feedbackCorrect);\n  screen.setCursor(105, 68);\n  screen.print(\"\
+    BAD:\");\n  screen.print(feedbackIncorrect);\n  screen.display();\n\n  if (previousLevelBucket\
+    \ != level / 1000) {\n    previousLevelBucket = level / 1000;\n    Serial.printf(\"\
+    {\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\":\\\"sensor\\\"\
+    ,\\\"key\\\":\\\"baby_cry_prediction\\\",\\\"value\\\":{\\\"cry_like\\\":%s,\\\
+    \"confidence\\\":%d,\\\"level\\\":%d}}}\\n\", cryLike ? \"true\" : \"false\",\
+    \ confidence, level);\n  }\n}\n"

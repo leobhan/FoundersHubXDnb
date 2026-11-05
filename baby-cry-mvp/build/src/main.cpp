@@ -3,8 +3,9 @@
 // Project: baby-cry-mvp
 // Board:   Atech 14-Port Board (14port)
 // Module:  neopixel as greenLight on port_1
+// Module:  button as correctButton on port_2
 // Module:  st7735_tft as screen on port_3, port_4
-// Module:  button as button on port_5
+// Module:  button as wrongButton on port_5
 // Module:  neopixel as redLight on port_6
 // Module:  microphone as mic on port_13, port_14
 
@@ -12,14 +13,15 @@
 #include "esp_system.h"   // esp_reset_reason() for boot diagnostics
 #include "atech_ui.h"       // EveryTimer, RisingEdge, Debouncer, atech::drawHeader... (and atech_helpers.h)
 #include "neopixel.h"
-#include "st7735_tft.h"
 #include "button.h"
+#include "st7735_tft.h"
 #include "microphone.h"
 
 
 NeoPixelGrid greenLight(9, 8);
+ButtonModule correctButton(5, 4);   // switch on Line A, V2.0 RGB light on Line B
 ST7735_TFT screen(18, 15, 17, 16);
-ButtonModule button(11, 10);   // switch on Line A, V2.0 RGB light on Line B
+ButtonModule wrongButton(11, 10);   // switch on Line A, V2.0 RGB light on Line B
 NeoPixelGrid redLight(13, 12);
 Microphone mic(39, 38, 36, 35);
 
@@ -188,10 +190,12 @@ void setup() {
 
     greenLight.begin();
 
+    correctButton.begin();
+
     screen.begin();
     screen.clear();
 
-    button.begin();
+    wrongButton.begin();
 
     redLight.begin();
 
@@ -229,10 +233,13 @@ void setup() {
     Serial.print("{\"instance\":\"greenLight\",\"module\":\"neopixel\",\"ok\":");
     Serial.print("true");
     Serial.print(",\"detectable\":false}");
+    Serial.print(",{\"instance\":\"correctButton\",\"module\":\"button\",\"ok\":");
+    Serial.print("true");
+    Serial.print(",\"detectable\":false}");
     Serial.print(",{\"instance\":\"screen\",\"module\":\"st7735_tft\",\"ok\":");
     Serial.print("true");
     Serial.print(",\"detectable\":false}");
-    Serial.print(",{\"instance\":\"button\",\"module\":\"button\",\"ok\":");
+    Serial.print(",{\"instance\":\"wrongButton\",\"module\":\"button\",\"ok\":");
     Serial.print("true");
     Serial.print(",\"detectable\":false}");
     Serial.print(",{\"instance\":\"redLight\",\"module\":\"neopixel\",\"ok\":");
@@ -249,12 +256,21 @@ void loop() {
     atechPollAction();   // one action per pass; module actions are handled here
     // Events are derived from the pin level, never from wasPressed()/wasReleased():
     // those consume the edge, and they belong to the user's code: block.
-    static bool button_evDown = false;
-    static unsigned long button_evAt = 0;
-    if (button.isPressed() != button_evDown && millis() - button_evAt >= 20) {
-      button_evDown = !button_evDown;
-      button_evAt = millis();
-      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"button\",\"key\":\"button\",\"value\":%d,\"source\":\"button\"}}\n", button_evDown ? 1 : 0);
+    static bool correctButton_evDown = false;
+    static unsigned long correctButton_evAt = 0;
+    if (correctButton.isPressed() != correctButton_evDown && millis() - correctButton_evAt >= 20) {
+      correctButton_evDown = !correctButton_evDown;
+      correctButton_evAt = millis();
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"button\",\"key\":\"correctButton\",\"value\":%d,\"source\":\"button\"}}\n", correctButton_evDown ? 1 : 0);
+    }
+    // Events are derived from the pin level, never from wasPressed()/wasReleased():
+    // those consume the edge, and they belong to the user's code: block.
+    static bool wrongButton_evDown = false;
+    static unsigned long wrongButton_evAt = 0;
+    if (wrongButton.isPressed() != wrongButton_evDown && millis() - wrongButton_evAt >= 20) {
+      wrongButton_evDown = !wrongButton_evDown;
+      wrongButton_evAt = millis();
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"button\",\"key\":\"wrongButton\",\"value\":%d,\"source\":\"button\"}}\n", wrongButton_evDown ? 1 : 0);
     }
     static unsigned long mic_last = 0;
     if (millis() - mic_last >= 250) {
@@ -268,14 +284,13 @@ void loop() {
     static unsigned long lastDraw = 0;
     static int previousLevelBucket = -1;
 
-    AtechGesture gesture = button.getGesture();
-    if (gesture == GESTURE_TAP) {
+    if (correctButton.wasPressed()) {
       feedbackCorrect++;
       greenLight.setAll(0, 255, 0);
       greenLight.show();
       redLight.clear();
       redLight.show();
-    } else if (gesture == GESTURE_LONG_PRESS) {
+    } else if (wrongButton.wasPressed()) {
       feedbackIncorrect++;
       redLight.setAll(255, 0, 0);
       redLight.show();

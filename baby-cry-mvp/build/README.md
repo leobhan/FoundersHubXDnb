@@ -5,8 +5,9 @@ Generated firmware for **Atech 14-Port Board** (`14port`).
 ## Modules
 
 - **NeoPixel 3x3 Grid** (`neopixel`) as `greenLight` on `port_1`
+- **Button** (`button`) as `correctButton` on `port_2`
 - **ST7735 TFT Color Display (160x80)** (`st7735_tft`) as `screen` on `port_3, port_4`
-- **Button** (`button`) as `button` on `port_5`
+- **Button** (`button`) as `wrongButton` on `port_5`
 - **NeoPixel 3x3 Grid** (`neopixel`) as `redLight` on `port_6`
 - **I2S MEMS Microphone (ICS-43434)** (`microphone`) as `mic` on `port_13, port_14`
 
