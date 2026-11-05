@@ -1,0 +1,83 @@
+name: baby-cry-mvp
+board: 14port
+modules:
+  - {id: neopixel, instance: greenLight, port: 1}
+  - {id: st7735_tft, instance: screen, ports: [3, 4]}
+  - {id: button, instance: button, port: 5}
+  - {id: neopixel, instance: redLight, port: 6}
+  - {id: microphone, instance: mic, ports: [13, 14]}
+feedback: false
+code:
+  globals: |
+    static int feedbackCorrect = 0;
+    static int feedbackIncorrect = 0;
+  setup: |
+    screen.setRotation(1);
+    screen.clear();
+    greenLight.clear();
+    greenLight.show();
+    redLight.clear();
+    redLight.show();
+  loop: |
+    static unsigned long lastDraw = 0;
+    static int previousLevelBucket = -1;
+
+    AtechGesture gesture = button.getGesture();
+    if (gesture == GESTURE_TAP) {
+      feedbackCorrect++;
+      greenLight.setAll(0, 255, 0);
+      greenLight.show();
+      redLight.clear();
+      redLight.show();
+    } else if (gesture == GESTURE_LONG_PRESS) {
+      feedbackIncorrect++;
+      redLight.setAll(255, 0, 0);
+      redLight.show();
+      greenLight.clear();
+      greenLight.show();
+    }
+
+    if (millis() - lastDraw >= 250) {
+      lastDraw = millis();
+      int level = mic.getSoundLevel();
+      if (level < 0) level = 0;
+      if (level > 32767) level = 32767;
+
+      // Initial MVP heuristic: high microphone energy maps to a cry-like signal.
+      // This is not a trained baby-cry classifier.
+      const int threshold = 4500;
+      bool cryLike = level >= threshold;
+      int distance = level >= threshold ? level - threshold : threshold - level;
+      int confidence = 55 + (distance * 40 / 12000);
+      if (confidence > 95) confidence = 95;
+      if (confidence < 55) confidence = 55;
+
+      screen.clear();
+      screen.setTextColor(ST7735_TFT::COLOR_WHITE);
+      screen.setTextSize(1);
+      screen.setCursor(4, 4);
+      screen.print("BABY CRY MVP - HEURISTIC");
+
+      screen.setTextSize(2);
+      screen.setCursor(4, 25);
+      screen.print(cryLike ? "CRY-LIKE" : "NOT CRY");
+
+      screen.setTextSize(1);
+      screen.setCursor(4, 52);
+      screen.print("Probability: ");
+      screen.print(confidence);
+      screen.print("%");
+
+      screen.setCursor(105, 52);
+      screen.print("OK:");
+      screen.print(feedbackCorrect);
+      screen.setCursor(105, 68);
+      screen.print("BAD:");
+      screen.print(feedbackIncorrect);
+      screen.display();
+
+      if (previousLevelBucket != level / 1000) {
+        previousLevelBucket = level / 1000;
+        Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"baby_cry_prediction\",\"value\":{\"cry_like\":%s,\"confidence\":%d,\"level\":%d}}}\n", cryLike ? "true" : "false", confidence, level);
+      }
+    }
