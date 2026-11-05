@@ -26,8 +26,218 @@ NeoPixelGrid redLight(13, 12);
 Microphone mic(39, 38, 36, 35);
 
 // ---- user globals ----
-static int feedbackCorrect = 0;
-static int feedbackIncorrect = 0;
+// Hearing a cry and guessing the need happen in cry/ (cry_dsp.h, cry_engine.h);
+// tools/baseline/README.md explains where the baseline comes from.
+#include <LittleFS.h>   // here too, so PlatformIO finds the library
+#include "../../cry/cry_engine.h"
+
+static const char* const NEED_NAME[CRY_N_NEEDS] = {"Hungry", "Sleepy", "Diaper", "Discomfort"};
+static const char* const NEED_SHORT[CRY_N_NEEDS] = {"Hun", "Sle", "Dia", "Dis"};
+static const char* const NEED_HINT[CRY_N_NEEDS] = {"Try a feed", "Try settling to sleep", "Check the diaper",
+                                                   "Burp, check temperature"};
+// The design's colours #F5A84A, #8DB8F2, #B9A3F2, #F08FA8 in RGB565.
+static const uint16_t NEED_COLOR[CRY_N_NEEDS] = {0xF549, 0x8DDE, 0xBD1E, 0xF475};
+static const uint16_t UI_GREY = 0x9CD3;
+
+enum UiState { UI_LISTENING, UI_CRY_HEARD, UI_GUESS, UI_GOT_IT, UI_NOT_SAVED, UI_FORGOT };
+static const unsigned long CRY_HEARD_MS = 1500;
+static const unsigned long MESSAGE_MS = 3000;
+static const unsigned long ANSWER_TIMEOUT_MS = 10UL * 60 * 1000;
+static const unsigned long FORGET_HOLD_MS = 3000;
+static const unsigned long LIGHT_MS = 1000;
+
+static CryListener cry;
+static CryStore store;
+static UiState ui = UI_LISTENING;
+static unsigned long uiSince = 0;
+static bool uiDirty = true;
+static float guessFp[CRY_N_FEATURES];
+static float guessProb[CRY_N_NEEDS];
+static uint8_t rejected = 0;            // a bit per need the parent said no to
+static int shown = 0;                   // the need on screen
+static bool savedToFlash = false;
+static unsigned long lastHungryMs = 0;  // last confirmed Hungry, 0 = none since boot
+static bool lightOn = false;
+static unsigned long lightSince = 0;
+
+static void setUi(UiState s) {
+  ui = s;
+  uiSince = millis();
+  uiDirty = true;
+}
+
+// The next guess waits until the baby has been quiet, so one long cry gives one guess.
+static void backToListening() {
+  cry.disarm();
+  setUi(UI_LISTENING);
+}
+
+static void flashLight(NeoPixelGrid& light, uint8_t r, uint8_t g) {
+  greenLight.clear();
+  greenLight.show();
+  redLight.clear();
+  redLight.show();
+  light.setAll(r, g, 0);
+  light.show();
+  lightOn = true;
+  lightSince = millis();
+}
+
+// ---- events to the laptop ----
+
+static void eventStart(const char* key) {
+  Serial.print("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"");
+  Serial.print(key);
+  Serial.print("\",\"value\":");
+}
+
+static void eventEnd() { Serial.println("}}"); }
+
+static void printFloats(const float* v, int n) {
+  Serial.print('[');
+  for (int i = 0; i < n; i++) {
+    if (i) Serial.print(',');
+    Serial.print(v[i], 5);
+  }
+  Serial.print(']');
+}
+
+// ---- the guess and the buttons ----
+
+// The most likely need the parent has not said no to, or -1.
+static int bestRemaining() {
+  int best = -1;
+  for (int c = 0; c < CRY_N_NEEDS; c++)
+    if (!(rejected & (1 << c)) && (best < 0 || guessProb[c] > guessProb[best])) best = c;
+  return best;
+}
+
+// A need's share of what is left after the parent's no's, in %.
+static int percentOf(int c) {
+  float left = 0;
+  for (int k = 0; k < CRY_N_NEEDS; k++)
+    if (!(rejected & (1 << k))) left += guessProb[k];
+  return (int)lroundf(100 * guessProb[c] / left);
+}
+
+static void startGuess() {
+  memcpy(guessFp, cry.fp, sizeof(guessFp));
+  float boost = 1;   // Hungry gets likelier from 2 h after a confirmed feed, up to 2x at 4 h
+  if (lastHungryMs) {
+    float hours = (millis() - lastHungryMs) / 3600000.0f;
+    boost = 1 + fminf(1, fmaxf(0, (hours - 2) / 2));
+  }
+  cryPosterior(guessFp, store.cries, store.count, boost, guessProb);
+  rejected = 0;
+  shown = bestRemaining();
+  setUi(UI_CRY_HEARD);
+  eventStart("cry_guess");
+  Serial.print('{');
+  for (int c = 0; c < CRY_N_NEEDS; c++) Serial.printf("\"%s\":%.3f,", NEED_NAME[c], guessProb[c]);
+  Serial.printf("\"learned\":%d,\"hungry_boost\":%.2f}", store.count, boost);
+  eventEnd();
+}
+
+// Green: the shown need was right. The cry is saved for this baby.
+static void confirmGuess() {
+  savedToFlash = store.add(shown, guessFp);
+  if (shown == NEED_HUNGRY) lastHungryMs = millis() | 1;
+  eventStart("cry_saved");
+  Serial.printf("{\"need\":\"%s\",\"learned\":%d,\"in_flash\":%s,\"fp\":", NEED_NAME[shown], store.count,
+                savedToFlash ? "true" : "false");
+  printFloats(guessFp, CRY_N_FEATURES);
+  Serial.print('}');
+  eventEnd();
+  flashLight(greenLight, 0, 255);
+  setUi(UI_GOT_IT);
+}
+
+// Red: show the next most likely need. After all four, nothing is saved.
+static void rejectGuess() {
+  rejected |= 1 << shown;
+  flashLight(redLight, 255, 0);
+  shown = bestRemaining();
+  if (shown < 0) setUi(UI_NOT_SAVED);
+  else uiDirty = true;
+}
+
+// ---- screen (plain placeholder until the Nattlys design is built) ----
+
+static void drawText(int x, int y, uint8_t size, uint16_t color, const char* text) {
+  screen.setTextSize(size);
+  screen.setTextColor(color);
+  screen.setCursor(x, y);
+  screen.print(text);
+}
+
+// What the listening screen says under its title.
+static int listeningHint() {
+  if (cry.quietFrames < 16) return 1;   // a cry-like frame in the last 0.5 s
+  if (!cry.isArmed()) return 2;
+  return 0;
+}
+
+static void drawUi() {
+  char buf[32];
+  screen.clear();
+  drawText(2, 1, 1, ST7735_TFT::COLOR_WHITE, "Nattlys");
+  snprintf(buf, sizeof(buf), "%d learned", store.count);
+  drawText(screen.width() - 2 - 6 * (int)strlen(buf), 1, 1, UI_GREY, buf);
+
+  switch (ui) {
+    case UI_LISTENING: {
+      drawText(2, 20, 2, ST7735_TFT::COLOR_WHITE, "Listening");
+      drawText(2, 44, 1, UI_GREY, "A guess appears when");
+      drawText(2, 54, 1, UI_GREY, "the baby cries.");
+      int hint = listeningHint();
+      if (hint == 1) drawText(2, 70, 1, ST7735_TFT::COLOR_ORANGE, "Hearing a cry...");
+      if (hint == 2) drawText(2, 70, 1, UI_GREY, "Next guess after quiet");
+      break;
+    }
+    case UI_CRY_HEARD:
+      drawText(2, 20, 2, ST7735_TFT::COLOR_WHITE, "Crying heard");
+      snprintf(buf, sizeof(buf), "Comparing with %d", store.count);
+      drawText(2, 44, 1, UI_GREY, buf);
+      drawText(2, 54, 1, UI_GREY, store.count == 1 ? "saved cry" : "saved cries");
+      break;
+    case UI_GUESS: {
+      drawText(2, 12, 1, UI_GREY, rejected ? "THEN MAYBE..." : "BEST GUESS");
+      drawText(2, 22, 2, NEED_COLOR[shown], NEED_NAME[shown]);
+      snprintf(buf, sizeof(buf), "%d%% sure", percentOf(shown));
+      drawText(2, 40, 1, NEED_COLOR[shown], buf);
+      drawText(2, 50, 1, ST7735_TFT::COLOR_WHITE, NEED_HINT[shown]);
+      int x = 2;
+      for (int c = 0; c < CRY_N_NEEDS; c++) {
+        if (c == shown) continue;
+        if (rejected & (1 << c)) snprintf(buf, sizeof(buf), "%s x ", NEED_SHORT[c]);
+        else snprintf(buf, sizeof(buf), "%s %d%% ", NEED_SHORT[c], percentOf(c));
+        drawText(x, 60, 1, (rejected & (1 << c)) ? UI_GREY : NEED_COLOR[c], buf);
+        x += 6 * strlen(buf);
+      }
+      drawText(2, 71, 1, UI_GREY, "Right? green yes, red no");
+      break;
+    }
+    case UI_GOT_IT:
+      drawText(2, 12, 1, UI_GREY, "GOT IT");
+      drawText(2, 22, 2, NEED_COLOR[shown], NEED_NAME[shown]);
+      drawText(2, 44, 1, ST7735_TFT::COLOR_WHITE, "Thanks! I know the");
+      drawText(2, 54, 1, ST7735_TFT::COLOR_WHITE, "baby a little better.");
+      drawText(2, 70, 1, UI_GREY, savedToFlash ? "Saved to the baby's cries" : "Kept until power-off");
+      break;
+    case UI_NOT_SAVED:
+      drawText(2, 12, 1, UI_GREY, "NOT SAVED");
+      drawText(2, 22, 2, ST7735_TFT::COLOR_WHITE, "None of these");
+      drawText(2, 44, 1, UI_GREY, "This cry won't teach");
+      drawText(2, 54, 1, UI_GREY, "me anything wrong.");
+      break;
+    case UI_FORGOT:
+      drawText(2, 20, 2, ST7735_TFT::COLOR_WHITE, "Start over");
+      drawText(2, 44, 1, UI_GREY, "All saved cries");
+      drawText(2, 54, 1, UI_GREY, "are forgotten.");
+      break;
+  }
+  screen.display();
+}
 
 // ---- atech actions (host -> board) ----
 // `atech send <key> [value]` / board.call(key, value). Module actions are dispatched
@@ -209,6 +419,15 @@ void setup() {
     redLight.clear();
     redLight.show();
 
+    store.begin();
+    cry.begin();
+    mic.onAudio(cryOnMic, nullptr);
+
+    eventStart("cry_store");
+    Serial.printf("{\"flash\":%s,\"learned\":%d}", store.ok ? "true" : "false", store.count);
+    eventEnd();
+    setUi(UI_LISTENING);
+
     // ---- atech boot diagnostics (read by `atech check`) ----
     {
     esp_reset_reason_t _rr = esp_reset_reason();
@@ -282,65 +501,105 @@ void loop() {
 
     // ---- user loop ----
     static unsigned long lastDraw = 0;
-    static int previousLevelBucket = -1;
+    static unsigned long lastDebug = 0;
+    static unsigned long bothSince = 0;
+    static bool bothReleased = true;
+    static int lastHint = 0;
 
-    if (correctButton.wasPressed()) {
-      feedbackCorrect++;
-      greenLight.setAll(0, 255, 0);
+    if (cry.pump(ui == UI_LISTENING)) startGuess();
+
+    // ---- actions from the laptop ----
+    if (atech_action == "cry_selftest") {
+      static float fp[CRY_N_FEATURES];
+      int r = crySelfTest(fp);   // blocks for a moment; a debugging aid only
+      if (r < 0) {
+        atechFail("not enough memory");
+      } else {
+        eventStart("cry_selftest_result");
+        Serial.printf("{\"result\":%d,\"fp\":", r);
+        printFloats(fp, CRY_N_FEATURES);
+        Serial.print('}');
+        eventEnd();
+      }
+      atechDone();
+      cry.skipBacklog();
+    } else if (atech_action == "cries_reset") {
+      store.clear();
+      lastHungryMs = 0;
+      setUi(UI_FORGOT);
+      atechDone();
+    }
+
+    // ---- buttons: each edge is read here only ----
+    bool yes = correctButton.wasPressed();
+    bool no = wrongButton.wasPressed();
+    unsigned long now = millis();
+
+    switch (ui) {
+      case UI_CRY_HEARD:
+        if (now - uiSince >= CRY_HEARD_MS) setUi(UI_GUESS);
+        break;
+      case UI_GUESS:
+        if (yes) confirmGuess();
+        else if (no) rejectGuess();
+        else if (now - uiSince >= ANSWER_TIMEOUT_MS) backToListening();
+        break;
+      case UI_GOT_IT:
+      case UI_NOT_SAVED:
+        if (now - uiSince >= MESSAGE_MS) backToListening();
+        break;
+      case UI_FORGOT:
+        if (now - uiSince >= MESSAGE_MS) setUi(UI_LISTENING);
+        break;
+      case UI_LISTENING:
+        break;
+    }
+
+    // Hold both buttons for 3 s while listening: forget every saved cry.
+    bool both = correctButton.isPressed() && wrongButton.isPressed();
+    if (!correctButton.isPressed() || !wrongButton.isPressed()) bothReleased = true;
+    if (ui == UI_LISTENING && both && bothReleased) {
+      if (!bothSince) bothSince = now | 1;
+      if (now - bothSince >= FORGET_HOLD_MS) {
+        store.clear();
+        lastHungryMs = 0;
+        bothSince = 0;
+        bothReleased = false;
+        setUi(UI_FORGOT);
+        eventStart("cries_reset");
+        Serial.print("{\"learned\":0}");
+        eventEnd();
+      }
+    } else {
+      bothSince = 0;
+    }
+
+    if (lightOn && now - lightSince >= LIGHT_MS) {
+      greenLight.clear();
       greenLight.show();
       redLight.clear();
       redLight.show();
-    } else if (wrongButton.wasPressed()) {
-      feedbackIncorrect++;
-      redLight.setAll(255, 0, 0);
-      redLight.show();
-      greenLight.clear();
-      greenLight.show();
+      lightOn = false;
     }
 
-    if (millis() - lastDraw >= 250) {
-      lastDraw = millis();
-      int level = mic.getSoundLevel();
-      if (level < 0) level = 0;
-      if (level > 32767) level = 32767;
+    if (now - lastDebug >= 250) {
+      lastDebug = now;
+      eventStart("cry_debug");
+      Serial.printf("{\"db\":%.1f,\"floor\":%.1f,\"f0\":%.0f,\"voicing\":%.2f,\"flatness\":%.3f,\"cry\":%d,"
+                    "\"window\":%.2f,\"bursts\":%d,\"armed\":%d,\"overruns\":%lu}",
+                    cry.last.db, cry.floorDb, cry.last.f0, cry.last.voicing, cry.last.flatness, cry.lastCry ? 1 : 0,
+                    cry.windowFraction(), cry.windowBursts(), cry.isArmed() ? 1 : 0, (unsigned long)cry.overruns);
+      eventEnd();
+    }
 
-      // Initial MVP heuristic: high microphone energy maps to a cry-like signal.
-      // This is not a trained baby-cry classifier.
-      const int threshold = 4500;
-      bool cryLike = level >= threshold;
-      int distance = level >= threshold ? level - threshold : threshold - level;
-      int confidence = 55 + (distance * 40 / 12000);
-      if (confidence > 95) confidence = 95;
-      if (confidence < 55) confidence = 55;
-
-      screen.clear();
-      screen.setTextColor(ST7735_TFT::COLOR_WHITE);
-      screen.setTextSize(1);
-      screen.setCursor(4, 4);
-      screen.print("BABY CRY MVP - HEURISTIC");
-
-      screen.setTextSize(2);
-      screen.setCursor(4, 25);
-      screen.print(cryLike ? "CRY-LIKE" : "NOT CRY");
-
-      screen.setTextSize(1);
-      screen.setCursor(4, 52);
-      screen.print("Probability: ");
-      screen.print(confidence);
-      screen.print("%");
-
-      screen.setCursor(105, 52);
-      screen.print("OK:");
-      screen.print(feedbackCorrect);
-      screen.setCursor(105, 68);
-      screen.print("BAD:");
-      screen.print(feedbackIncorrect);
-      screen.display();
-
-      if (previousLevelBucket != level / 1000) {
-        previousLevelBucket = level / 1000;
-        Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"baby_cry_prediction\",\"value\":{\"cry_like\":%s,\"confidence\":%d,\"level\":%d}}}\n", cryLike ? "true" : "false", confidence, level);
-      }
+    if (ui == UI_LISTENING && listeningHint() != lastHint) {
+      lastHint = listeningHint();
+      uiDirty = true;
+    }
+    if (uiDirty && now - lastDraw >= 250) {
+      lastDraw = now;
+      uiDirty = false;
+      drawUi();
     }
 
     atechFinishAction(); // an action nobody handled is answered with ok:false
