@@ -25,24 +25,170 @@ modules:
   - port_14
 feedback: false
 code:
-  globals: "static int feedbackCorrect = 0;\nstatic int feedbackIncorrect = 0;\nstatic\
-    \ unsigned long feedbackUntil = 0;\nstatic int16_t audioRing[8192];\nstatic volatile\
-    \ unsigned int ringHead = 0;\nstatic volatile unsigned int ringTail = 0;\n\nvoid\
-    \ onMicAudio(const int16_t* samples, int count, void* ctx) {\n  for (int i = 0;\
-    \ i < count; i++) {\n    unsigned int next = (ringHead + 1) % 8192;\n    if (next\
-    \ == ringTail) {\n      ringTail = (ringTail + 1) % 8192;\n    }\n    audioRing[ringHead]\
-    \ = samples[i];\n    ringHead = next;\n  }\n}\n\nstatic char base64Chars[] = \"\
-    ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";\n\nstatic\
-    \ void encodePcmBase64(const int16_t* samples, int count, char* output, int outputSize)\
-    \ {\n  int maxBytes = count * 2;\n  int outIndex = 0;\n  for (int base = 0; base\
-    \ < maxBytes && outIndex + 4 < outputSize; base += 3) {\n    unsigned char bytes[3]\
-    \ = {0, 0, 0};\n    for (int i = 0; i < 3 && base + i < maxBytes; i++) {\n   \
-    \   bytes[i] = ((const unsigned char*)samples)[base + i];\n    }\n    unsigned\
-    \ int block = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2];\n    output[outIndex++]\
-    \ = base64Chars[(block >> 18) & 63];\n    output[outIndex++] = base64Chars[(block\
-    \ >> 12) & 63];\n    output[outIndex++] = (base + 1 < maxBytes) ? base64Chars[(block\
-    \ >> 6) & 63] : '=';\n    output[outIndex++] = (base + 2 < maxBytes) ? base64Chars[block\
-    \ & 63] : '=';\n  }\n  output[outIndex] = '\\0';\n}\n"
+  globals: "#include <Fonts/FreeSansBold9pt7b.h>\n\nstatic unsigned long feedbackUntil\
+    \ = 0;\nstatic int16_t audioRing[8192];\nstatic volatile unsigned int ringHead\
+    \ = 0;\nstatic volatile unsigned int ringTail = 0;\n\nvoid onMicAudio(const int16_t*\
+    \ samples, int count, void* ctx) {\n  for (int i = 0; i < count; i++) {\n    unsigned\
+    \ int next = (ringHead + 1) % 8192;\n    if (next == ringTail) {\n      ringTail\
+    \ = (ringTail + 1) % 8192;\n    }\n    audioRing[ringHead] = samples[i];\n   \
+    \ ringHead = next;\n  }\n}\n\nstatic char base64Chars[] = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\"\
+    ;\n\nstatic void encodePcmBase64(const int16_t* samples, int count, char* output,\
+    \ int outputSize) {\n  int maxBytes = count * 2;\n  int outIndex = 0;\n  for (int\
+    \ base = 0; base < maxBytes && outIndex + 4 < outputSize; base += 3) {\n    unsigned\
+    \ char bytes[3] = {0, 0, 0};\n    for (int i = 0; i < 3 && base + i < maxBytes;\
+    \ i++) {\n      bytes[i] = ((const unsigned char*)samples)[base + i];\n    }\n\
+    \    unsigned int block = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2];\n   \
+    \ output[outIndex++] = base64Chars[(block >> 18) & 63];\n    output[outIndex++]\
+    \ = base64Chars[(block >> 12) & 63];\n    output[outIndex++] = (base + 1 < maxBytes)\
+    \ ? base64Chars[(block >> 6) & 63] : '=';\n    output[outIndex++] = (base + 2\
+    \ < maxBytes) ? base64Chars[block & 63] : '=';\n  }\n  output[outIndex] = '\\\
+    0';\n}\n\n// ======================================================================\n\
+    // \"Best guess\" screen (160x80)\n//\n// The classifier hands over FOUR percentages\
+    \ in this fixed order:\n//   Hungry, Sleepy, Diaper, Discomfort   (whole numbers,\
+    \ sum ~100)\n// Two ways in:\n//   1. Stand-in classifier below (USE_STUB_CLASSIFIER)\
+    \ - cycles preset\n//      scores whenever the mic hears something loud. Remove\
+    \ when the real\n//      classifier exists.\n//   2. Host action \"set_scores\"\
+    , e.g.\n//        atech send set_scores '{\"hungry\":72,\"sleepy\":18,\"diaper\"\
+    :7,\"discomfort\":3}'\n// The screen shows only the most probable category. The\
+    \ parent answers\n// with the green (right) or red (wrong) button.\n// ======================================================================\n\
+    enum Category : uint8_t { CAT_HUNGRY = 0, CAT_SLEEPY, CAT_DIAPER, CAT_DISCOMFORT,\
+    \ CAT_COUNT };\nenum ScreenMode : uint8_t { MODE_LISTENING, MODE_GUESS, MODE_THANKS,\
+    \ MODE_SORRY };\n\nstatic const char* const BABY_NAME = \"Ella\";\nstatic const\
+    \ char* const CATEGORY_NAMES[CAT_COUNT] = {\"Hungry\", \"Sleepy\", \"Diaper\"\
+    , \"Discomfort\"};\nstatic const char* const CATEGORY_KEYS[CAT_COUNT] = {\"hungry\"\
+    , \"sleepy\", \"diaper\", \"discomfort\"};\nstatic const char* const CATEGORY_ADVICE[CAT_COUNT]\
+    \ = {\"Try a feed\", \"Try settling\", \"Check the diaper\", \"Check clothes\"\
+    };\n\nstatic const uint8_t MAX_GUESSES = 2;                    // best guess +\
+    \ one next guess after a red press\nstatic const unsigned long RESULT_MS = 1800;\
+    \             // \"Thanks!\" / \"Sorry!\" screen time\nstatic const unsigned long\
+    \ GUESS_TIMEOUT_MS = 30000;     // unanswered guess goes back to listening\n\n\
+    static const bool USE_STUB_CLASSIFIER = true;\nstatic const int STUB_LOUD_LEVEL\
+    \ = 450;                  // same loudness threshold as the heuristic below\n\
+    static const int STUB_LOUD_TICKS = 2;                    // loud for this many\
+    \ 250 ms ticks = \"a cry\"\nstatic const uint8_t STUB_SCORES[][CAT_COUNT] = {\n\
+    \  {72, 18, 7, 3},\n  {15, 68, 10, 7},\n  {8, 12, 74, 6},\n  {10, 9, 17, 64},\n\
+    };\nstatic const int STUB_SCORE_SETS = sizeof(STUB_SCORES) / sizeof(STUB_SCORES[0]);\n\
+    \n// ---- colours (RGB565) ----\nstatic constexpr uint16_t uiColor(uint8_t r,\
+    \ uint8_t g, uint8_t b) {\n  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b\
+    \ >> 3);\n}\nstatic const uint16_t UI_BG    = uiColor(11, 16, 32);\nstatic const\
+    \ uint16_t UI_PANEL = uiColor(26, 30, 54);\nstatic const uint16_t UI_TEXT  = uiColor(240,\
+    \ 236, 228);\nstatic const uint16_t UI_MUTED = uiColor(150, 158, 180);\nstatic\
+    \ const uint16_t UI_INK   = uiColor(20, 24, 40);\nstatic const uint16_t UI_GREEN\
+    \ = uiColor(60, 200, 130);\nstatic const uint16_t UI_RED   = uiColor(240, 80,\
+    \ 90);\nstatic const uint16_t CATEGORY_COLORS[CAT_COUNT] = {\n  uiColor(245, 166,\
+    \ 74),   // Hungry: orange\n  uiColor(90, 160, 240),   // Sleepy: blue\n  uiColor(160,\
+    \ 130, 240),  // Diaper: purple\n  uiColor(240, 110, 160),  // Discomfort: pink\n\
+    };\n\n// ---- layout ----\nstatic const int16_t CIRCLE_X = 26;\nstatic const int16_t\
+    \ CIRCLE_Y = 37;\nstatic const int16_t CIRCLE_R = 22;\nstatic const int16_t TEXT_X\
+    \ = 54;\nstatic const int16_t TEXT_MAX_W = 102;\n\nstruct GuessState {\n  ScreenMode\
+    \ mode;\n  uint8_t scores[CAT_COUNT];\n  uint8_t order[CAT_COUNT];   // category\
+    \ indexes, most probable first\n  uint8_t rank;               // which entry of\
+    \ order[] is on screen\n  unsigned long since;        // when mode last changed\n\
+    \  bool dirty;                 // screen needs a redraw\n};\nstatic GuessState\
+    \ guess = {MODE_LISTENING, {0, 0, 0, 0}, {0, 1, 2, 3}, 0, 0, true};\n\n// ----\
+    \ scores ----\n// Scales raw weights to whole percentages. False when a weight\
+    \ is negative or all are zero.\nstatic bool normalizeScores(const long* raw, uint8_t*\
+    \ out) {\n  long sum = 0;\n  for (int i = 0; i < CAT_COUNT; i++) {\n    if (raw[i]\
+    \ < 0) return false;\n    sum += raw[i];\n  }\n  if (sum <= 0) return false;\n\
+    \  for (int i = 0; i < CAT_COUNT; i++) {\n    out[i] = (uint8_t)((raw[i] * 100\
+    \ + sum / 2) / sum);\n  }\n  return true;\n}\n\n// Fills order[] with category\
+    \ indexes, highest score first (ties keep category order).\nstatic void rankScores(const\
+    \ uint8_t* scores, uint8_t* order) {\n  for (int i = 0; i < CAT_COUNT; i++) order[i]\
+    \ = i;\n  for (int i = 1; i < CAT_COUNT; i++) {\n    uint8_t key = order[i];\n\
+    \    int j = i - 1;\n    while (j >= 0 && scores[order[j]] < scores[key]) {\n\
+    \      order[j + 1] = order[j];\n      j--;\n    }\n    order[j + 1] = key;\n\
+    \  }\n}\n\nstatic void setMode(ScreenMode mode) {\n  guess.mode = mode;\n  guess.since\
+    \ = millis();\n  guess.dirty = true;\n}\n\nstatic void startGuess(const uint8_t*\
+    \ scores) {\n  memcpy(guess.scores, scores, CAT_COUNT);\n  rankScores(guess.scores,\
+    \ guess.order);\n  guess.rank = 0;\n  setMode(MODE_GUESS);\n}\n\n// ---- stand-in\
+    \ classifier ----\nstatic void stubClassifierTick(int level) {\n  static int loudTicks\
+    \ = 0;\n  static int nextSet = 0;\n  loudTicks = (level >= STUB_LOUD_LEVEL) ?\
+    \ loudTicks + 1 : 0;\n  if (guess.mode != MODE_LISTENING || loudTicks < STUB_LOUD_TICKS)\
+    \ return;\n  loudTicks = 0;\n  startGuess(STUB_SCORES[nextSet]);\n  nextSet =\
+    \ (nextSet + 1) % STUB_SCORE_SETS;\n}\n\n// ---- parent feedback ----\nstatic\
+    \ void emitFeedbackEvent(bool correct) {\n  uint8_t cat = guess.order[guess.rank];\n\
+    \  Serial.printf(\"{\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\
+    \":\\\"feedback\\\",\\\"key\\\":\\\"guess_feedback\\\",\\\"value\\\":{\\\"category\\\
+    \":\\\"%s\\\",\\\"percent\\\":%d,\\\"rank\\\":%d,\\\"correct\\\":%s}}}\\n\",\n\
+    \                CATEGORY_KEYS[cat], guess.scores[cat], guess.rank, correct ?\
+    \ \"true\" : \"false\");\n}\n\n// Green = the shown category was right. Red =\
+    \ wrong, show the next one (up to MAX_GUESSES).\nstatic void onFeedback(bool correct)\
+    \ {\n  if (guess.mode != MODE_GUESS) return;\n  emitFeedbackEvent(correct);\n\
+    \  if (correct) {\n    setMode(MODE_THANKS);\n  } else if (guess.rank + 1 < MAX_GUESSES)\
+    \ {\n    guess.rank++;\n    setMode(MODE_GUESS);\n  } else {\n    setMode(MODE_SORRY);\n\
+    \  }\n}\n\nstatic void tickScreen() {\n  unsigned long elapsed = millis() - guess.since;\n\
+    \  bool resultShown = guess.mode == MODE_THANKS || guess.mode == MODE_SORRY;\n\
+    \  if (resultShown && elapsed >= RESULT_MS) {\n    setMode(MODE_LISTENING);\n\
+    \  } else if (guess.mode == MODE_GUESS && elapsed >= GUESS_TIMEOUT_MS) {\n   \
+    \ setMode(MODE_LISTENING);\n  }\n}\n\n// ---- icons (drawn in the dark ink colour\
+    \ on the category circle) ----\nstatic void drawBottleIcon(int16_t cx, int16_t\
+    \ cy, uint16_t bg) {\n  screen.fillRoundRect(cx - 2, cy - 14, 4, 6, 2, UI_INK);\
+    \    // nipple\n  screen.fillRect(cx - 4, cy - 9, 8, 4, UI_INK);             //\
+    \ neck\n  screen.fillRect(cx - 7, cy - 6, 14, 3, UI_INK);            // collar\n\
+    \  screen.fillRoundRect(cx - 6, cy - 4, 12, 18, 3, UI_INK);   // body\n  for (int\
+    \ i = 0; i < 3; i++) {\n    screen.drawLine(cx - 2, cy + 2 + i * 4, cx + 2, cy\
+    \ + 2 + i * 4, bg);   // measure marks\n  }\n}\n\nstatic void drawMoonIcon(int16_t\
+    \ cx, int16_t cy, uint16_t bg) {\n  screen.fillCircle(cx - 2, cy + 1, 11, UI_INK);\n\
+    \  screen.fillCircle(cx + 4, cy - 3, 9, bg);                  // bite out of the\
+    \ disc = crescent\n  screen.drawLine(cx + 6, cy - 13, cx + 12, cy - 13, UI_INK);\
+    \  // small \"z\"\n  screen.drawLine(cx + 12, cy - 13, cx + 6, cy - 7, UI_INK);\n\
+    \  screen.drawLine(cx + 6, cy - 7, cx + 12, cy - 7, UI_INK);\n}\n\nstatic void\
+    \ drawDiaperIcon(int16_t cx, int16_t cy, uint16_t bg) {\n  screen.fillRoundRect(cx\
+    \ - 12, cy - 9, 24, 8, 2, UI_INK);   // waistband\n  screen.fillTriangle(cx -\
+    \ 12, cy - 2, cx + 12, cy - 2, cx, cy + 11, UI_INK);   // body\n  screen.fillRect(cx\
+    \ - 9, cy - 7, 3, 4, bg);                 // tape tabs\n  screen.fillRect(cx +\
+    \ 6, cy - 7, 3, 4, bg);\n}\n\nstatic void drawFrownIcon(int16_t cx, int16_t cy)\
+    \ {\n  for (int r = 10; r <= 12; r++) screen.drawCircle(cx, cy, r, UI_INK);\n\
+    \  screen.fillCircle(cx - 4, cy - 3, 2, UI_INK);\n  screen.fillCircle(cx + 4,\
+    \ cy - 3, 2, UI_INK);\n  for (int dy = 0; dy <= 1; dy++) {                   \
+    \       // frown, 2 px thick\n    screen.drawLine(cx - 5, cy + 7 + dy, cx - 2,\
+    \ cy + 4 + dy, UI_INK);\n    screen.drawLine(cx - 2, cy + 4 + dy, cx + 2, cy +\
+    \ 4 + dy, UI_INK);\n    screen.drawLine(cx + 2, cy + 4 + dy, cx + 5, cy + 7 +\
+    \ dy, UI_INK);\n  }\n}\n\nstatic void drawCategoryIcon(uint8_t cat, uint16_t bg)\
+    \ {\n  switch (cat) {\n    case CAT_HUNGRY:  drawBottleIcon(CIRCLE_X, CIRCLE_Y,\
+    \ bg); break;\n    case CAT_SLEEPY:  drawMoonIcon(CIRCLE_X, CIRCLE_Y, bg); break;\n\
+    \    case CAT_DIAPER:  drawDiaperIcon(CIRCLE_X, CIRCLE_Y, bg); break;\n    default:\
+    \          drawFrownIcon(CIRCLE_X, CIRCLE_Y); break;\n  }\n}\n\n// ---- text pieces\
+    \ ----\nstatic void useSmallFont(uint16_t color, uint8_t size) {\n  screen.setFont(nullptr);\n\
+    \  screen.setTextSize(size);\n  screen.setTextColor(color);\n}\n\nstatic void\
+    \ drawHeader(const char* label) {\n  useSmallFont(UI_TEXT, 1);\n  screen.setCursor(4,\
+    \ 2);\n  screen.print(BABY_NAME);\n  if (label == nullptr) return;\n  useSmallFont(UI_MUTED,\
+    \ 1);\n  screen.setCursor(156 - screen.textWidth(label), 2);\n  screen.print(label);\n\
+    }\n\n// Bold title next to the circle; falls back to the small font if it would\
+    \ not fit.\nstatic void drawTitle(const char* text) {\n  screen.setFont(&FreeSansBold9pt7b);\n\
+    \  screen.setTextSize(1);\n  screen.setTextColor(UI_TEXT);\n  if (screen.textWidth(text)\
+    \ <= TEXT_MAX_W) {\n    screen.setCursor(TEXT_X, 31);\n  } else {\n    useSmallFont(UI_TEXT,\
+    \ 1);\n    screen.setCursor(TEXT_X, 20);\n  }\n  screen.print(text);\n}\n\nstatic\
+    \ void drawPercent(int percent, uint16_t color) {\n  useSmallFont(color, 2);\n\
+    \  screen.setCursor(TEXT_X, 35);\n  screen.print(percent > 99 ? 99 : percent);\n\
+    \  screen.print(\"% sure\");\n}\n\nstatic void drawSubtitle(const char* text)\
+    \ {\n  useSmallFont(UI_MUTED, 1);\n  screen.setCursor(TEXT_X, 55);\n  screen.print(text);\n\
+    }\n\nstatic void drawFeedbackStrip() {\n  screen.fillRoundRect(2, 65, 156, 14,\
+    \ 4, UI_PANEL);\n  useSmallFont(UI_TEXT, 1);\n  screen.setCursor(8, 69);\n  screen.print(\"\
+    Was I right?\");\n  screen.fillCircle(92, 72, 3, UI_GREEN);\n  screen.setCursor(98,\
+    \ 69);\n  screen.print(\"Yes\");\n  screen.fillCircle(124, 72, 3, UI_RED);\n \
+    \ screen.setCursor(130, 69);\n  screen.print(\"No\");\n}\n\n// ---- screens ----\n\
+    static void renderGuess() {\n  uint8_t cat = guess.order[guess.rank];\n  uint16_t\
+    \ color = CATEGORY_COLORS[cat];\n  drawHeader(guess.rank == 0 ? \"BEST GUESS\"\
+    \ : \"NEXT GUESS\");\n  screen.fillCircle(CIRCLE_X, CIRCLE_Y, CIRCLE_R, color);\n\
+    \  drawCategoryIcon(cat, color);\n  drawTitle(CATEGORY_NAMES[cat]);\n  drawPercent(guess.scores[cat],\
+    \ color);\n  drawSubtitle(CATEGORY_ADVICE[cat]);\n  drawFeedbackStrip();\n}\n\n\
+    static void renderListening() {\n  drawHeader(nullptr);\n  screen.fillCircle(CIRCLE_X,\
+    \ CIRCLE_Y, CIRCLE_R, UI_PANEL);\n  for (int i = -1; i <= 1; i++) {\n    screen.fillCircle(CIRCLE_X\
+    \ + i * 9, CIRCLE_Y, 3, UI_MUTED);\n  }\n  drawTitle(\"Listening\");\n  drawSubtitle(\"\
+    Waiting for a cry\");\n}\n\nstatic void renderThanks() {\n  drawHeader(nullptr);\n\
+    \  screen.fillCircle(CIRCLE_X, CIRCLE_Y, CIRCLE_R, UI_GREEN);\n  for (int dy =\
+    \ 0; dy <= 1; dy++) {                          // check mark, 2 px thick\n   \
+    \ screen.drawLine(CIRCLE_X - 9, CIRCLE_Y + dy, CIRCLE_X - 3, CIRCLE_Y + 7 + dy,\
+    \ UI_INK);\n    screen.drawLine(CIRCLE_X - 3, CIRCLE_Y + 7 + dy, CIRCLE_X + 9,\
+    \ CIRCLE_Y - 7 + dy, UI_INK);\n  }\n  drawTitle(\"Thanks!\");\n  drawSubtitle(\"\
+    Got it\");\n}\n\nstatic void renderSorry() {\n  drawHeader(nullptr);\n  screen.fillCircle(CIRCLE_X,\
+    \ CIRCLE_Y, CIRCLE_R, UI_PANEL);\n  useSmallFont(UI_MUTED, 3);\n  screen.setCursor(CIRCLE_X\
+    \ - 9, CIRCLE_Y - 12);\n  screen.print(\"?\");\n  drawTitle(\"Sorry!\");\n  drawSubtitle(\"\
+    Listening again\");\n}\n\nstatic void renderScreen() {\n  screen.fillScreen(UI_BG);\n\
+    \  switch (guess.mode) {\n    case MODE_GUESS:  renderGuess(); break;\n    case\
+    \ MODE_THANKS: renderThanks(); break;\n    case MODE_SORRY:  renderSorry(); break;\n\
+    \    default:          renderListening(); break;\n  }\n  screen.display();\n}\n"
   setup: 'screen.setRotation(1);
 
     screen.clear();
@@ -62,38 +208,39 @@ code:
     mic.onAudio(onMicAudio, nullptr);
 
     '
-  loop: "static unsigned long lastDraw = 0;\nstatic unsigned long lastAudioSend =\
-    \ 0;\n\nif (correctButton.wasPressed()) {\n  feedbackCorrect++;\n  greenLight.setBrightness(18);\n\
+  loop: "static unsigned long lastTick = 0;\nstatic unsigned long lastAudioSend =\
+    \ 0;\n\nif (correctButton.wasPressed()) {\n  onFeedback(true);\n  greenLight.setBrightness(18);\n\
     \  greenLight.setAll(0, 255, 0);\n  greenLight.show();\n  redLight.setBrightness(4);\n\
     \  redLight.setAll(255, 0, 0);\n  redLight.show();\n  feedbackUntil = millis()\
-    \ + 1500;\n} else if (wrongButton.wasPressed()) {\n  feedbackIncorrect++;\n  redLight.setBrightness(18);\n\
+    \ + 1500;\n} else if (wrongButton.wasPressed()) {\n  onFeedback(false);\n  redLight.setBrightness(18);\n\
     \  redLight.setAll(255, 0, 0);\n  redLight.show();\n  greenLight.setBrightness(4);\n\
     \  greenLight.setAll(0, 255, 0);\n  greenLight.show();\n  feedbackUntil = millis()\
     \ + 1500;\n}\n\nif (feedbackUntil != 0 && millis() >= feedbackUntil) {\n  feedbackUntil\
     \ = 0;\n  greenLight.setBrightness(6);\n  greenLight.setAll(0, 255, 0);\n  greenLight.show();\n\
     \  redLight.setBrightness(6);\n  redLight.setAll(255, 0, 0);\n  redLight.show();\n\
-    }\n\nif (millis() - lastAudioSend >= 100) {\n  lastAudioSend = millis();\n  if\
-    \ (ringTail != ringHead) {\n    int16_t pcm[512];\n    int count = 0;\n    while\
-    \ (count < 512 && ringTail != ringHead) {\n      pcm[count++] = audioRing[ringTail];\n\
-    \      ringTail = (ringTail + 1) % 8192;\n    }\n    char encoded[1400];\n   \
-    \ encodePcmBase64(pcm, count, encoded, sizeof(encoded));\n    Serial.print(\"\
-    {\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\":\\\"log\\\",\\\
-    \"key\\\":\\\"mic_pcm\\\",\\\"value\\\":\\\"\");\n    Serial.print(encoded);\n\
-    \    Serial.println(\"\\\"}}\");\n  }\n}\n\nif (millis() - lastDraw >= 250) {\n\
-    \  lastDraw = millis();\n  int level = mic.getSoundLevel();\n  if (level < 0)\
-    \ level = 0;\n  if (level > 32767) level = 32767;\n\n  // This screen value is\
-    \ a local loudness heuristic, not the laptop YAMNet result.\n  int threshold =\
-    \ 450;\n  bool cryLike = level >= threshold;\n  int confidence = 55 + (int)((level\
-    \ - threshold) / 20);\n  if (confidence > 95) confidence = 95;\n  if (confidence\
-    \ < 55) confidence = 55;\n\n  screen.clear();\n  screen.setTextColor(ST7735_TFT::COLOR_WHITE);\n\
-    \  screen.setTextSize(1);\n  screen.setCursor(4, 4);\n  screen.print(\"YAMNET\
-    \ STREAMING MVP\");\n\n  screen.setTextSize(2);\n  screen.setCursor(4, 25);\n\
-    \  screen.print(cryLike ? \"LOUD SOUND\" : \"QUIET\");\n\n  screen.setTextSize(1);\n\
-    \  screen.setCursor(4, 52);\n  screen.print(\"Level: \");\n  screen.print(level);\n\
-    \  screen.setCursor(4, 68);\n  screen.print(\"Laptop YAMNet active\");\n\n  screen.setCursor(105,\
-    \ 52);\n  screen.print(\"OK:\");\n  screen.print(feedbackCorrect);\n  screen.setCursor(105,\
-    \ 68);\n  screen.print(\"BAD:\");\n  screen.print(feedbackIncorrect);\n  screen.display();\n\
-    \n  Serial.printf(\"{\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\
-    \":\\\"sensor\\\",\\\"key\\\":\\\"baby_cry_prediction\\\",\\\"value\\\":{\\\"\
-    cry_like\\\":%s,\\\"confidence\\\":%d,\\\"level\\\":%d}}}\\n\", cryLike ? \"true\"\
-    \ : \"false\", confidence, level);\n}\n"
+    }\n\n// Scores from the laptop classifier: atech send set_scores '{\"hungry\"\
+    :72,\"sleepy\":18,\"diaper\":7,\"discomfort\":3}'\nif (atech_action == \"set_scores\"\
+    ) {\n  long raw[CAT_COUNT] = {\n    atechNum(atech_value, \"hungry\", 0), atechNum(atech_value,\
+    \ \"sleepy\", 0),\n    atechNum(atech_value, \"diaper\", 0), atechNum(atech_value,\
+    \ \"discomfort\", 0)};\n  uint8_t scores[CAT_COUNT];\n  if (normalizeScores(raw,\
+    \ scores)) {\n    startGuess(scores);\n  } else {\n    atechFail(\"set_scores\
+    \ needs hungry, sleepy, diaper, discomfort: none negative, not all zero\");\n\
+    \  }\n  atechDone();\n}\n\nif (millis() - lastAudioSend >= 100) {\n  lastAudioSend\
+    \ = millis();\n  if (ringTail != ringHead) {\n    int16_t pcm[512];\n    int count\
+    \ = 0;\n    while (count < 512 && ringTail != ringHead) {\n      pcm[count++]\
+    \ = audioRing[ringTail];\n      ringTail = (ringTail + 1) % 8192;\n    }\n   \
+    \ char encoded[1400];\n    encodePcmBase64(pcm, count, encoded, sizeof(encoded));\n\
+    \    Serial.print(\"{\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\
+    \":\\\"log\\\",\\\"key\\\":\\\"mic_pcm\\\",\\\"value\\\":\\\"\");\n    Serial.print(encoded);\n\
+    \    Serial.println(\"\\\"}}\");\n  }\n}\n\nif (millis() - lastTick >= 250) {\n\
+    \  lastTick = millis();\n  int level = mic.getSoundLevel();\n  if (level < 0)\
+    \ level = 0;\n  if (level > 32767) level = 32767;\n\n  if (USE_STUB_CLASSIFIER)\
+    \ stubClassifierTick(level);\n\n  // Local loudness heuristic, not the laptop\
+    \ YAMNet result.\n  int threshold = 450;\n  bool cryLike = level >= threshold;\n\
+    \  int confidence = 55 + (int)((level - threshold) / 20);\n  if (confidence >\
+    \ 95) confidence = 95;\n  if (confidence < 55) confidence = 55;\n  Serial.printf(\"\
+    {\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\":\\\"sensor\\\"\
+    ,\\\"key\\\":\\\"baby_cry_prediction\\\",\\\"value\\\":{\\\"cry_like\\\":%s,\\\
+    \"confidence\\\":%d,\\\"level\\\":%d}}}\\n\", cryLike ? \"true\" : \"false\",\
+    \ confidence, level);\n}\n\ntickScreen();\nif (guess.dirty) {\n  guess.dirty =\
+    \ false;\n  renderScreen();\n}\n"

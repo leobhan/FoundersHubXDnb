@@ -26,8 +26,8 @@ NeoPixelGrid redLight(13, 12);
 Microphone mic(39, 38, 36, 35);
 
 // ---- user globals ----
-static int feedbackCorrect = 0;
-static int feedbackIncorrect = 0;
+#include <Fonts/FreeSansBold9pt7b.h>
+
 static unsigned long feedbackUntil = 0;
 static int16_t audioRing[8192];
 static volatile unsigned int ringHead = 0;
@@ -61,6 +61,320 @@ static void encodePcmBase64(const int16_t* samples, int count, char* output, int
     output[outIndex++] = (base + 2 < maxBytes) ? base64Chars[block & 63] : '=';
   }
   output[outIndex] = '\0';
+}
+
+// ======================================================================
+// "Best guess" screen (160x80)
+//
+// The classifier hands over FOUR percentages in this fixed order:
+//   Hungry, Sleepy, Diaper, Discomfort   (whole numbers, sum ~100)
+// Two ways in:
+//   1. Stand-in classifier below (USE_STUB_CLASSIFIER) - cycles preset
+//      scores whenever the mic hears something loud. Remove when the real
+//      classifier exists.
+//   2. Host action "set_scores", e.g.
+//        atech send set_scores '{"hungry":72,"sleepy":18,"diaper":7,"discomfort":3}'
+// The screen shows only the most probable category. The parent answers
+// with the green (right) or red (wrong) button.
+// ======================================================================
+enum Category : uint8_t { CAT_HUNGRY = 0, CAT_SLEEPY, CAT_DIAPER, CAT_DISCOMFORT, CAT_COUNT };
+enum ScreenMode : uint8_t { MODE_LISTENING, MODE_GUESS, MODE_THANKS, MODE_SORRY };
+
+static const char* const BABY_NAME = "Ella";
+static const char* const CATEGORY_NAMES[CAT_COUNT] = {"Hungry", "Sleepy", "Diaper", "Discomfort"};
+static const char* const CATEGORY_KEYS[CAT_COUNT] = {"hungry", "sleepy", "diaper", "discomfort"};
+static const char* const CATEGORY_ADVICE[CAT_COUNT] = {"Try a feed", "Try settling", "Check the diaper", "Check clothes"};
+
+static const uint8_t MAX_GUESSES = 2;                    // best guess + one next guess after a red press
+static const unsigned long RESULT_MS = 1800;             // "Thanks!" / "Sorry!" screen time
+static const unsigned long GUESS_TIMEOUT_MS = 30000;     // unanswered guess goes back to listening
+
+static const bool USE_STUB_CLASSIFIER = true;
+static const int STUB_LOUD_LEVEL = 450;                  // same loudness threshold as the heuristic below
+static const int STUB_LOUD_TICKS = 2;                    // loud for this many 250 ms ticks = "a cry"
+static const uint8_t STUB_SCORES[][CAT_COUNT] = {
+  {72, 18, 7, 3},
+  {15, 68, 10, 7},
+  {8, 12, 74, 6},
+  {10, 9, 17, 64},
+};
+static const int STUB_SCORE_SETS = sizeof(STUB_SCORES) / sizeof(STUB_SCORES[0]);
+
+// ---- colours (RGB565) ----
+static constexpr uint16_t uiColor(uint8_t r, uint8_t g, uint8_t b) {
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+static const uint16_t UI_BG    = uiColor(11, 16, 32);
+static const uint16_t UI_PANEL = uiColor(26, 30, 54);
+static const uint16_t UI_TEXT  = uiColor(240, 236, 228);
+static const uint16_t UI_MUTED = uiColor(150, 158, 180);
+static const uint16_t UI_INK   = uiColor(20, 24, 40);
+static const uint16_t UI_GREEN = uiColor(60, 200, 130);
+static const uint16_t UI_RED   = uiColor(240, 80, 90);
+static const uint16_t CATEGORY_COLORS[CAT_COUNT] = {
+  uiColor(245, 166, 74),   // Hungry: orange
+  uiColor(90, 160, 240),   // Sleepy: blue
+  uiColor(160, 130, 240),  // Diaper: purple
+  uiColor(240, 110, 160),  // Discomfort: pink
+};
+
+// ---- layout ----
+static const int16_t CIRCLE_X = 26;
+static const int16_t CIRCLE_Y = 37;
+static const int16_t CIRCLE_R = 22;
+static const int16_t TEXT_X = 54;
+static const int16_t TEXT_MAX_W = 102;
+
+struct GuessState {
+  ScreenMode mode;
+  uint8_t scores[CAT_COUNT];
+  uint8_t order[CAT_COUNT];   // category indexes, most probable first
+  uint8_t rank;               // which entry of order[] is on screen
+  unsigned long since;        // when mode last changed
+  bool dirty;                 // screen needs a redraw
+};
+static GuessState guess = {MODE_LISTENING, {0, 0, 0, 0}, {0, 1, 2, 3}, 0, 0, true};
+
+// ---- scores ----
+// Scales raw weights to whole percentages. False when a weight is negative or all are zero.
+static bool normalizeScores(const long* raw, uint8_t* out) {
+  long sum = 0;
+  for (int i = 0; i < CAT_COUNT; i++) {
+    if (raw[i] < 0) return false;
+    sum += raw[i];
+  }
+  if (sum <= 0) return false;
+  for (int i = 0; i < CAT_COUNT; i++) {
+    out[i] = (uint8_t)((raw[i] * 100 + sum / 2) / sum);
+  }
+  return true;
+}
+
+// Fills order[] with category indexes, highest score first (ties keep category order).
+static void rankScores(const uint8_t* scores, uint8_t* order) {
+  for (int i = 0; i < CAT_COUNT; i++) order[i] = i;
+  for (int i = 1; i < CAT_COUNT; i++) {
+    uint8_t key = order[i];
+    int j = i - 1;
+    while (j >= 0 && scores[order[j]] < scores[key]) {
+      order[j + 1] = order[j];
+      j--;
+    }
+    order[j + 1] = key;
+  }
+}
+
+static void setMode(ScreenMode mode) {
+  guess.mode = mode;
+  guess.since = millis();
+  guess.dirty = true;
+}
+
+static void startGuess(const uint8_t* scores) {
+  memcpy(guess.scores, scores, CAT_COUNT);
+  rankScores(guess.scores, guess.order);
+  guess.rank = 0;
+  setMode(MODE_GUESS);
+}
+
+// ---- stand-in classifier ----
+static void stubClassifierTick(int level) {
+  static int loudTicks = 0;
+  static int nextSet = 0;
+  loudTicks = (level >= STUB_LOUD_LEVEL) ? loudTicks + 1 : 0;
+  if (guess.mode != MODE_LISTENING || loudTicks < STUB_LOUD_TICKS) return;
+  loudTicks = 0;
+  startGuess(STUB_SCORES[nextSet]);
+  nextSet = (nextSet + 1) % STUB_SCORE_SETS;
+}
+
+// ---- parent feedback ----
+static void emitFeedbackEvent(bool correct) {
+  uint8_t cat = guess.order[guess.rank];
+  Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"feedback\",\"key\":\"guess_feedback\",\"value\":{\"category\":\"%s\",\"percent\":%d,\"rank\":%d,\"correct\":%s}}}\n",
+                CATEGORY_KEYS[cat], guess.scores[cat], guess.rank, correct ? "true" : "false");
+}
+
+// Green = the shown category was right. Red = wrong, show the next one (up to MAX_GUESSES).
+static void onFeedback(bool correct) {
+  if (guess.mode != MODE_GUESS) return;
+  emitFeedbackEvent(correct);
+  if (correct) {
+    setMode(MODE_THANKS);
+  } else if (guess.rank + 1 < MAX_GUESSES) {
+    guess.rank++;
+    setMode(MODE_GUESS);
+  } else {
+    setMode(MODE_SORRY);
+  }
+}
+
+static void tickScreen() {
+  unsigned long elapsed = millis() - guess.since;
+  bool resultShown = guess.mode == MODE_THANKS || guess.mode == MODE_SORRY;
+  if (resultShown && elapsed >= RESULT_MS) {
+    setMode(MODE_LISTENING);
+  } else if (guess.mode == MODE_GUESS && elapsed >= GUESS_TIMEOUT_MS) {
+    setMode(MODE_LISTENING);
+  }
+}
+
+// ---- icons (drawn in the dark ink colour on the category circle) ----
+static void drawBottleIcon(int16_t cx, int16_t cy, uint16_t bg) {
+  screen.fillRoundRect(cx - 2, cy - 14, 4, 6, 2, UI_INK);    // nipple
+  screen.fillRect(cx - 4, cy - 9, 8, 4, UI_INK);             // neck
+  screen.fillRect(cx - 7, cy - 6, 14, 3, UI_INK);            // collar
+  screen.fillRoundRect(cx - 6, cy - 4, 12, 18, 3, UI_INK);   // body
+  for (int i = 0; i < 3; i++) {
+    screen.drawLine(cx - 2, cy + 2 + i * 4, cx + 2, cy + 2 + i * 4, bg);   // measure marks
+  }
+}
+
+static void drawMoonIcon(int16_t cx, int16_t cy, uint16_t bg) {
+  screen.fillCircle(cx - 2, cy + 1, 11, UI_INK);
+  screen.fillCircle(cx + 4, cy - 3, 9, bg);                  // bite out of the disc = crescent
+  screen.drawLine(cx + 6, cy - 13, cx + 12, cy - 13, UI_INK);  // small "z"
+  screen.drawLine(cx + 12, cy - 13, cx + 6, cy - 7, UI_INK);
+  screen.drawLine(cx + 6, cy - 7, cx + 12, cy - 7, UI_INK);
+}
+
+static void drawDiaperIcon(int16_t cx, int16_t cy, uint16_t bg) {
+  screen.fillRoundRect(cx - 12, cy - 9, 24, 8, 2, UI_INK);   // waistband
+  screen.fillTriangle(cx - 12, cy - 2, cx + 12, cy - 2, cx, cy + 11, UI_INK);   // body
+  screen.fillRect(cx - 9, cy - 7, 3, 4, bg);                 // tape tabs
+  screen.fillRect(cx + 6, cy - 7, 3, 4, bg);
+}
+
+static void drawFrownIcon(int16_t cx, int16_t cy) {
+  for (int r = 10; r <= 12; r++) screen.drawCircle(cx, cy, r, UI_INK);
+  screen.fillCircle(cx - 4, cy - 3, 2, UI_INK);
+  screen.fillCircle(cx + 4, cy - 3, 2, UI_INK);
+  for (int dy = 0; dy <= 1; dy++) {                          // frown, 2 px thick
+    screen.drawLine(cx - 5, cy + 7 + dy, cx - 2, cy + 4 + dy, UI_INK);
+    screen.drawLine(cx - 2, cy + 4 + dy, cx + 2, cy + 4 + dy, UI_INK);
+    screen.drawLine(cx + 2, cy + 4 + dy, cx + 5, cy + 7 + dy, UI_INK);
+  }
+}
+
+static void drawCategoryIcon(uint8_t cat, uint16_t bg) {
+  switch (cat) {
+    case CAT_HUNGRY:  drawBottleIcon(CIRCLE_X, CIRCLE_Y, bg); break;
+    case CAT_SLEEPY:  drawMoonIcon(CIRCLE_X, CIRCLE_Y, bg); break;
+    case CAT_DIAPER:  drawDiaperIcon(CIRCLE_X, CIRCLE_Y, bg); break;
+    default:          drawFrownIcon(CIRCLE_X, CIRCLE_Y); break;
+  }
+}
+
+// ---- text pieces ----
+static void useSmallFont(uint16_t color, uint8_t size) {
+  screen.setFont(nullptr);
+  screen.setTextSize(size);
+  screen.setTextColor(color);
+}
+
+static void drawHeader(const char* label) {
+  useSmallFont(UI_TEXT, 1);
+  screen.setCursor(4, 2);
+  screen.print(BABY_NAME);
+  if (label == nullptr) return;
+  useSmallFont(UI_MUTED, 1);
+  screen.setCursor(156 - screen.textWidth(label), 2);
+  screen.print(label);
+}
+
+// Bold title next to the circle; falls back to the small font if it would not fit.
+static void drawTitle(const char* text) {
+  screen.setFont(&FreeSansBold9pt7b);
+  screen.setTextSize(1);
+  screen.setTextColor(UI_TEXT);
+  if (screen.textWidth(text) <= TEXT_MAX_W) {
+    screen.setCursor(TEXT_X, 31);
+  } else {
+    useSmallFont(UI_TEXT, 1);
+    screen.setCursor(TEXT_X, 20);
+  }
+  screen.print(text);
+}
+
+static void drawPercent(int percent, uint16_t color) {
+  useSmallFont(color, 2);
+  screen.setCursor(TEXT_X, 35);
+  screen.print(percent > 99 ? 99 : percent);
+  screen.print("% sure");
+}
+
+static void drawSubtitle(const char* text) {
+  useSmallFont(UI_MUTED, 1);
+  screen.setCursor(TEXT_X, 55);
+  screen.print(text);
+}
+
+static void drawFeedbackStrip() {
+  screen.fillRoundRect(2, 65, 156, 14, 4, UI_PANEL);
+  useSmallFont(UI_TEXT, 1);
+  screen.setCursor(8, 69);
+  screen.print("Was I right?");
+  screen.fillCircle(92, 72, 3, UI_GREEN);
+  screen.setCursor(98, 69);
+  screen.print("Yes");
+  screen.fillCircle(124, 72, 3, UI_RED);
+  screen.setCursor(130, 69);
+  screen.print("No");
+}
+
+// ---- screens ----
+static void renderGuess() {
+  uint8_t cat = guess.order[guess.rank];
+  uint16_t color = CATEGORY_COLORS[cat];
+  drawHeader(guess.rank == 0 ? "BEST GUESS" : "NEXT GUESS");
+  screen.fillCircle(CIRCLE_X, CIRCLE_Y, CIRCLE_R, color);
+  drawCategoryIcon(cat, color);
+  drawTitle(CATEGORY_NAMES[cat]);
+  drawPercent(guess.scores[cat], color);
+  drawSubtitle(CATEGORY_ADVICE[cat]);
+  drawFeedbackStrip();
+}
+
+static void renderListening() {
+  drawHeader(nullptr);
+  screen.fillCircle(CIRCLE_X, CIRCLE_Y, CIRCLE_R, UI_PANEL);
+  for (int i = -1; i <= 1; i++) {
+    screen.fillCircle(CIRCLE_X + i * 9, CIRCLE_Y, 3, UI_MUTED);
+  }
+  drawTitle("Listening");
+  drawSubtitle("Waiting for a cry");
+}
+
+static void renderThanks() {
+  drawHeader(nullptr);
+  screen.fillCircle(CIRCLE_X, CIRCLE_Y, CIRCLE_R, UI_GREEN);
+  for (int dy = 0; dy <= 1; dy++) {                          // check mark, 2 px thick
+    screen.drawLine(CIRCLE_X - 9, CIRCLE_Y + dy, CIRCLE_X - 3, CIRCLE_Y + 7 + dy, UI_INK);
+    screen.drawLine(CIRCLE_X - 3, CIRCLE_Y + 7 + dy, CIRCLE_X + 9, CIRCLE_Y - 7 + dy, UI_INK);
+  }
+  drawTitle("Thanks!");
+  drawSubtitle("Got it");
+}
+
+static void renderSorry() {
+  drawHeader(nullptr);
+  screen.fillCircle(CIRCLE_X, CIRCLE_Y, CIRCLE_R, UI_PANEL);
+  useSmallFont(UI_MUTED, 3);
+  screen.setCursor(CIRCLE_X - 9, CIRCLE_Y - 12);
+  screen.print("?");
+  drawTitle("Sorry!");
+  drawSubtitle("Listening again");
+}
+
+static void renderScreen() {
+  screen.fillScreen(UI_BG);
+  switch (guess.mode) {
+    case MODE_GUESS:  renderGuess(); break;
+    case MODE_THANKS: renderThanks(); break;
+    case MODE_SORRY:  renderSorry(); break;
+    default:          renderListening(); break;
+  }
+  screen.display();
 }
 
 // ---- atech actions (host -> board) ----
@@ -318,11 +632,11 @@ void loop() {
     }
 
     // ---- user loop ----
-    static unsigned long lastDraw = 0;
+    static unsigned long lastTick = 0;
     static unsigned long lastAudioSend = 0;
 
     if (correctButton.wasPressed()) {
-      feedbackCorrect++;
+      onFeedback(true);
       greenLight.setBrightness(18);
       greenLight.setAll(0, 255, 0);
       greenLight.show();
@@ -331,7 +645,7 @@ void loop() {
       redLight.show();
       feedbackUntil = millis() + 1500;
     } else if (wrongButton.wasPressed()) {
-      feedbackIncorrect++;
+      onFeedback(false);
       redLight.setBrightness(18);
       redLight.setAll(255, 0, 0);
       redLight.show();
@@ -351,6 +665,20 @@ void loop() {
       redLight.show();
     }
 
+    // Scores from the laptop classifier: atech send set_scores '{"hungry":72,"sleepy":18,"diaper":7,"discomfort":3}'
+    if (atech_action == "set_scores") {
+      long raw[CAT_COUNT] = {
+        atechNum(atech_value, "hungry", 0), atechNum(atech_value, "sleepy", 0),
+        atechNum(atech_value, "diaper", 0), atechNum(atech_value, "discomfort", 0)};
+      uint8_t scores[CAT_COUNT];
+      if (normalizeScores(raw, scores)) {
+        startGuess(scores);
+      } else {
+        atechFail("set_scores needs hungry, sleepy, diaper, discomfort: none negative, not all zero");
+      }
+      atechDone();
+    }
+
     if (millis() - lastAudioSend >= 100) {
       lastAudioSend = millis();
       if (ringTail != ringHead) {
@@ -368,45 +696,27 @@ void loop() {
       }
     }
 
-    if (millis() - lastDraw >= 250) {
-      lastDraw = millis();
+    if (millis() - lastTick >= 250) {
+      lastTick = millis();
       int level = mic.getSoundLevel();
       if (level < 0) level = 0;
       if (level > 32767) level = 32767;
 
-      // This screen value is a local loudness heuristic, not the laptop YAMNet result.
+      if (USE_STUB_CLASSIFIER) stubClassifierTick(level);
+
+      // Local loudness heuristic, not the laptop YAMNet result.
       int threshold = 450;
       bool cryLike = level >= threshold;
       int confidence = 55 + (int)((level - threshold) / 20);
       if (confidence > 95) confidence = 95;
       if (confidence < 55) confidence = 55;
-
-      screen.clear();
-      screen.setTextColor(ST7735_TFT::COLOR_WHITE);
-      screen.setTextSize(1);
-      screen.setCursor(4, 4);
-      screen.print("YAMNET STREAMING MVP");
-
-      screen.setTextSize(2);
-      screen.setCursor(4, 25);
-      screen.print(cryLike ? "LOUD SOUND" : "QUIET");
-
-      screen.setTextSize(1);
-      screen.setCursor(4, 52);
-      screen.print("Level: ");
-      screen.print(level);
-      screen.setCursor(4, 68);
-      screen.print("Laptop YAMNet active");
-
-      screen.setCursor(105, 52);
-      screen.print("OK:");
-      screen.print(feedbackCorrect);
-      screen.setCursor(105, 68);
-      screen.print("BAD:");
-      screen.print(feedbackIncorrect);
-      screen.display();
-
       Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"baby_cry_prediction\",\"value\":{\"cry_like\":%s,\"confidence\":%d,\"level\":%d}}}\n", cryLike ? "true" : "false", confidence, level);
+    }
+
+    tickScreen();
+    if (guess.dirty) {
+      guess.dirty = false;
+      renderScreen();
     }
 
     atechFinishAction(); // an action nobody handled is answered with ok:false
