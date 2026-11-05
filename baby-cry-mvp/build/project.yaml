@@ -25,46 +25,75 @@ modules:
   - port_14
 feedback: false
 code:
-  globals: 'static int feedbackCorrect = 0;
-
-    static int feedbackIncorrect = 0;
-
-    '
+  globals: "static int feedbackCorrect = 0;\nstatic int feedbackIncorrect = 0;\nstatic\
+    \ unsigned long feedbackUntil = 0;\nstatic int16_t audioRing[8192];\nstatic volatile\
+    \ unsigned int ringHead = 0;\nstatic volatile unsigned int ringTail = 0;\n\nvoid\
+    \ onMicAudio(const int16_t* samples, int count, void* ctx) {\n  for (int i = 0;\
+    \ i < count; i++) {\n    unsigned int next = (ringHead + 1) % 8192;\n    if (next\
+    \ == ringTail) {\n      ringTail = (ringTail + 1) % 8192;\n    }\n    audioRing[ringHead]\
+    \ = samples[i];\n    ringHead = next;\n  }\n}\n\nstatic char base64Chars[] = \"\
+    ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";\n\nstatic\
+    \ void encodePcmBase64(const int16_t* samples, int count, char* output, int outputSize)\
+    \ {\n  int maxBytes = count * 2;\n  int outIndex = 0;\n  for (int base = 0; base\
+    \ < maxBytes && outIndex + 4 < outputSize; base += 3) {\n    unsigned char bytes[3]\
+    \ = {0, 0, 0};\n    for (int i = 0; i < 3 && base + i < maxBytes; i++) {\n   \
+    \   bytes[i] = ((const unsigned char*)samples)[base + i];\n    }\n    unsigned\
+    \ int block = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2];\n    output[outIndex++]\
+    \ = base64Chars[(block >> 18) & 63];\n    output[outIndex++] = base64Chars[(block\
+    \ >> 12) & 63];\n    output[outIndex++] = (base + 1 < maxBytes) ? base64Chars[(block\
+    \ >> 6) & 63] : '=';\n    output[outIndex++] = (base + 2 < maxBytes) ? base64Chars[block\
+    \ & 63] : '=';\n  }\n  output[outIndex] = '\\0';\n}\n"
   setup: 'screen.setRotation(1);
 
     screen.clear();
 
-    greenLight.clear();
+    greenLight.setBrightness(6);
+
+    greenLight.setAll(0, 255, 0);
 
     greenLight.show();
 
-    redLight.clear();
+    redLight.setBrightness(6);
+
+    redLight.setAll(255, 0, 0);
 
     redLight.show();
 
+    mic.onAudio(onMicAudio, nullptr);
+
     '
-  loop: "static unsigned long lastDraw = 0;\nstatic int previousLevelBucket = -1;\n\
-    \nif (correctButton.wasPressed()) {\n  feedbackCorrect++;\n  greenLight.setAll(0,\
-    \ 255, 0);\n  greenLight.show();\n  redLight.clear();\n  redLight.show();\n} else\
-    \ if (wrongButton.wasPressed()) {\n  feedbackIncorrect++;\n  redLight.setAll(255,\
-    \ 0, 0);\n  redLight.show();\n  greenLight.clear();\n  greenLight.show();\n}\n\
-    \nif (millis() - lastDraw >= 250) {\n  lastDraw = millis();\n  int level = mic.getSoundLevel();\n\
-    \  if (level < 0) level = 0;\n  if (level > 32767) level = 32767;\n\n  // Initial\
-    \ MVP heuristic: high microphone energy maps to a cry-like signal.\n  // This\
-    \ is not a trained baby-cry classifier.\n  const int threshold = 4500;\n  bool\
-    \ cryLike = level >= threshold;\n  int distance = level >= threshold ? level -\
-    \ threshold : threshold - level;\n  int confidence = 55 + (distance * 40 / 12000);\n\
-    \  if (confidence > 95) confidence = 95;\n  if (confidence < 55) confidence =\
-    \ 55;\n\n  screen.clear();\n  screen.setTextColor(ST7735_TFT::COLOR_WHITE);\n\
-    \  screen.setTextSize(1);\n  screen.setCursor(4, 4);\n  screen.print(\"BABY CRY\
-    \ MVP - HEURISTIC\");\n\n  screen.setTextSize(2);\n  screen.setCursor(4, 25);\n\
-    \  screen.print(cryLike ? \"CRY-LIKE\" : \"NOT CRY\");\n\n  screen.setTextSize(1);\n\
-    \  screen.setCursor(4, 52);\n  screen.print(\"Probability: \");\n  screen.print(confidence);\n\
-    \  screen.print(\"%\");\n\n  screen.setCursor(105, 52);\n  screen.print(\"OK:\"\
-    );\n  screen.print(feedbackCorrect);\n  screen.setCursor(105, 68);\n  screen.print(\"\
-    BAD:\");\n  screen.print(feedbackIncorrect);\n  screen.display();\n\n  if (previousLevelBucket\
-    \ != level / 1000) {\n    previousLevelBucket = level / 1000;\n    Serial.printf(\"\
-    {\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\":\\\"sensor\\\"\
-    ,\\\"key\\\":\\\"baby_cry_prediction\\\",\\\"value\\\":{\\\"cry_like\\\":%s,\\\
-    \"confidence\\\":%d,\\\"level\\\":%d}}}\\n\", cryLike ? \"true\" : \"false\",\
-    \ confidence, level);\n  }\n}\n"
+  loop: "static unsigned long lastDraw = 0;\nstatic unsigned long lastAudioSend =\
+    \ 0;\n\nif (correctButton.wasPressed()) {\n  feedbackCorrect++;\n  greenLight.setBrightness(18);\n\
+    \  greenLight.setAll(0, 255, 0);\n  greenLight.show();\n  redLight.setBrightness(4);\n\
+    \  redLight.setAll(255, 0, 0);\n  redLight.show();\n  feedbackUntil = millis()\
+    \ + 1500;\n} else if (wrongButton.wasPressed()) {\n  feedbackIncorrect++;\n  redLight.setBrightness(18);\n\
+    \  redLight.setAll(255, 0, 0);\n  redLight.show();\n  greenLight.setBrightness(4);\n\
+    \  greenLight.setAll(0, 255, 0);\n  greenLight.show();\n  feedbackUntil = millis()\
+    \ + 1500;\n}\n\nif (feedbackUntil != 0 && millis() >= feedbackUntil) {\n  feedbackUntil\
+    \ = 0;\n  greenLight.setBrightness(6);\n  greenLight.setAll(0, 255, 0);\n  greenLight.show();\n\
+    \  redLight.setBrightness(6);\n  redLight.setAll(255, 0, 0);\n  redLight.show();\n\
+    }\n\nif (millis() - lastAudioSend >= 100) {\n  lastAudioSend = millis();\n  if\
+    \ (ringTail != ringHead) {\n    int16_t pcm[512];\n    int count = 0;\n    while\
+    \ (count < 512 && ringTail != ringHead) {\n      pcm[count++] = audioRing[ringTail];\n\
+    \      ringTail = (ringTail + 1) % 8192;\n    }\n    char encoded[1400];\n   \
+    \ encodePcmBase64(pcm, count, encoded, sizeof(encoded));\n    Serial.print(\"\
+    {\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\":\\\"log\\\",\\\
+    \"key\\\":\\\"mic_pcm\\\",\\\"value\\\":\\\"\");\n    Serial.print(encoded);\n\
+    \    Serial.println(\"\\\"}}\");\n  }\n}\n\nif (millis() - lastDraw >= 250) {\n\
+    \  lastDraw = millis();\n  int level = mic.getSoundLevel();\n  if (level < 0)\
+    \ level = 0;\n  if (level > 32767) level = 32767;\n\n  // This screen value is\
+    \ a local loudness heuristic, not the laptop YAMNet result.\n  int threshold =\
+    \ 450;\n  bool cryLike = level >= threshold;\n  int confidence = 55 + (int)((level\
+    \ - threshold) / 20);\n  if (confidence > 95) confidence = 95;\n  if (confidence\
+    \ < 55) confidence = 55;\n\n  screen.clear();\n  screen.setTextColor(ST7735_TFT::COLOR_WHITE);\n\
+    \  screen.setTextSize(1);\n  screen.setCursor(4, 4);\n  screen.print(\"YAMNET\
+    \ STREAMING MVP\");\n\n  screen.setTextSize(2);\n  screen.setCursor(4, 25);\n\
+    \  screen.print(cryLike ? \"LOUD SOUND\" : \"QUIET\");\n\n  screen.setTextSize(1);\n\
+    \  screen.setCursor(4, 52);\n  screen.print(\"Level: \");\n  screen.print(level);\n\
+    \  screen.setCursor(4, 68);\n  screen.print(\"Laptop YAMNet active\");\n\n  screen.setCursor(105,\
+    \ 52);\n  screen.print(\"OK:\");\n  screen.print(feedbackCorrect);\n  screen.setCursor(105,\
+    \ 68);\n  screen.print(\"BAD:\");\n  screen.print(feedbackIncorrect);\n  screen.display();\n\
+    \n  Serial.printf(\"{\\\"type\\\":\\\"event\\\",\\\"payload\\\":{\\\"event_type\\\
+    \":\\\"sensor\\\",\\\"key\\\":\\\"baby_cry_prediction\\\",\\\"value\\\":{\\\"\
+    cry_like\\\":%s,\\\"confidence\\\":%d,\\\"level\\\":%d}}}\\n\", cryLike ? \"true\"\
+    \ : \"false\", confidence, level);\n}\n"

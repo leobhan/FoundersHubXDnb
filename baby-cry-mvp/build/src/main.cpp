@@ -28,6 +28,40 @@ Microphone mic(39, 38, 36, 35);
 // ---- user globals ----
 static int feedbackCorrect = 0;
 static int feedbackIncorrect = 0;
+static unsigned long feedbackUntil = 0;
+static int16_t audioRing[8192];
+static volatile unsigned int ringHead = 0;
+static volatile unsigned int ringTail = 0;
+
+void onMicAudio(const int16_t* samples, int count, void* ctx) {
+  for (int i = 0; i < count; i++) {
+    unsigned int next = (ringHead + 1) % 8192;
+    if (next == ringTail) {
+      ringTail = (ringTail + 1) % 8192;
+    }
+    audioRing[ringHead] = samples[i];
+    ringHead = next;
+  }
+}
+
+static char base64Chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void encodePcmBase64(const int16_t* samples, int count, char* output, int outputSize) {
+  int maxBytes = count * 2;
+  int outIndex = 0;
+  for (int base = 0; base < maxBytes && outIndex + 4 < outputSize; base += 3) {
+    unsigned char bytes[3] = {0, 0, 0};
+    for (int i = 0; i < 3 && base + i < maxBytes; i++) {
+      bytes[i] = ((const unsigned char*)samples)[base + i];
+    }
+    unsigned int block = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2];
+    output[outIndex++] = base64Chars[(block >> 18) & 63];
+    output[outIndex++] = base64Chars[(block >> 12) & 63];
+    output[outIndex++] = (base + 1 < maxBytes) ? base64Chars[(block >> 6) & 63] : '=';
+    output[outIndex++] = (base + 2 < maxBytes) ? base64Chars[block & 63] : '=';
+  }
+  output[outIndex] = '\0';
+}
 
 // ---- atech actions (host -> board) ----
 // `atech send <key> [value]` / board.call(key, value). Module actions are dispatched
@@ -204,10 +238,13 @@ void setup() {
     // ---- user setup ----
     screen.setRotation(1);
     screen.clear();
-    greenLight.clear();
+    greenLight.setBrightness(6);
+    greenLight.setAll(0, 255, 0);
     greenLight.show();
-    redLight.clear();
+    redLight.setBrightness(6);
+    redLight.setAll(255, 0, 0);
     redLight.show();
+    mic.onAudio(onMicAudio, nullptr);
 
     // ---- atech boot diagnostics (read by `atech check`) ----
     {
@@ -282,20 +319,53 @@ void loop() {
 
     // ---- user loop ----
     static unsigned long lastDraw = 0;
-    static int previousLevelBucket = -1;
+    static unsigned long lastAudioSend = 0;
 
     if (correctButton.wasPressed()) {
       feedbackCorrect++;
+      greenLight.setBrightness(18);
       greenLight.setAll(0, 255, 0);
       greenLight.show();
-      redLight.clear();
-      redLight.show();
-    } else if (wrongButton.wasPressed()) {
-      feedbackIncorrect++;
+      redLight.setBrightness(4);
       redLight.setAll(255, 0, 0);
       redLight.show();
-      greenLight.clear();
+      feedbackUntil = millis() + 1500;
+    } else if (wrongButton.wasPressed()) {
+      feedbackIncorrect++;
+      redLight.setBrightness(18);
+      redLight.setAll(255, 0, 0);
+      redLight.show();
+      greenLight.setBrightness(4);
+      greenLight.setAll(0, 255, 0);
       greenLight.show();
+      feedbackUntil = millis() + 1500;
+    }
+
+    if (feedbackUntil != 0 && millis() >= feedbackUntil) {
+      feedbackUntil = 0;
+      greenLight.setBrightness(6);
+      greenLight.setAll(0, 255, 0);
+      greenLight.show();
+      redLight.setBrightness(6);
+      redLight.setAll(255, 0, 0);
+      redLight.show();
+    }
+
+    if (millis() - lastAudioSend >= 100) {
+      lastAudioSend = millis();
+      if (ringTail != ringHead) {
+        int16_t pcm[512];
+        int count = 0;
+        while (count < 512 && ringTail != ringHead) {
+          pcm[count++] = audioRing[ringTail];
+          ringTail = (ringTail + 1) % 8192;
+        }
+        char encoded[1400];
+        encodePcmBase64(pcm, count, encoded, sizeof(encoded));
+        Serial.print("{\"type\":\"event\",\"payload\":{\"event_type\":\"log\",\"key\":\"mic_pcm\",\"value\":\"");
+        Serial.print(encoded);
+        Serial.println("\"}}");
+      }
     }
 
     if (millis() - lastDraw >= 250) {
@@ -304,12 +374,10 @@ void loop() {
       if (level < 0) level = 0;
       if (level > 32767) level = 32767;
 
-      // Initial MVP heuristic: high microphone energy maps to a cry-like signal.
-      // This is not a trained baby-cry classifier.
-      const int threshold = 4500;
+      // This screen value is a local loudness heuristic, not the laptop YAMNet result.
+      int threshold = 450;
       bool cryLike = level >= threshold;
-      int distance = level >= threshold ? level - threshold : threshold - level;
-      int confidence = 55 + (distance * 40 / 12000);
+      int confidence = 55 + (int)((level - threshold) / 20);
       if (confidence > 95) confidence = 95;
       if (confidence < 55) confidence = 55;
 
@@ -317,17 +385,18 @@ void loop() {
       screen.setTextColor(ST7735_TFT::COLOR_WHITE);
       screen.setTextSize(1);
       screen.setCursor(4, 4);
-      screen.print("BABY CRY MVP - HEURISTIC");
+      screen.print("YAMNET STREAMING MVP");
 
       screen.setTextSize(2);
       screen.setCursor(4, 25);
-      screen.print(cryLike ? "CRY-LIKE" : "NOT CRY");
+      screen.print(cryLike ? "LOUD SOUND" : "QUIET");
 
       screen.setTextSize(1);
       screen.setCursor(4, 52);
-      screen.print("Probability: ");
-      screen.print(confidence);
-      screen.print("%");
+      screen.print("Level: ");
+      screen.print(level);
+      screen.setCursor(4, 68);
+      screen.print("Laptop YAMNet active");
 
       screen.setCursor(105, 52);
       screen.print("OK:");
@@ -337,10 +406,7 @@ void loop() {
       screen.print(feedbackIncorrect);
       screen.display();
 
-      if (previousLevelBucket != level / 1000) {
-        previousLevelBucket = level / 1000;
-        Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"baby_cry_prediction\",\"value\":{\"cry_like\":%s,\"confidence\":%d,\"level\":%d}}}\n", cryLike ? "true" : "false", confidence, level);
-      }
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"baby_cry_prediction\",\"value\":{\"cry_like\":%s,\"confidence\":%d,\"level\":%d}}}\n", cryLike ? "true" : "false", confidence, level);
     }
 
     atechFinishAction(); // an action nobody handled is answered with ok:false
