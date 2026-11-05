@@ -1,0 +1,3 @@
+# Needed by demo_dataset.py (the board connection). atech is a pre-release,
+# so install with:  pip install --pre -r requirements-demo.txt
+atech>=1.0.0a12

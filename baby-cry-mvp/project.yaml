@@ -175,7 +175,7 @@ code:
     // ---- parent feedback ----
     static void emitFeedbackEvent(bool correct) {
       uint8_t cat = guess.order[guess.rank];
-      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"feedback\",\"key\":\"guess_feedback\",\"value\":{\"category\":\"%s\",\"percent\":%d,\"rank\":%d,\"correct\":%s}}}\n",
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"state\",\"key\":\"guess_feedback\",\"value\":{\"category\":\"%s\",\"percent\":%d,\"rank\":%d,\"correct\":%s}}}\n",
                     CATEGORY_KEYS[cat], guess.scores[cat], guess.rank, correct ? "true" : "false");
     }
 
