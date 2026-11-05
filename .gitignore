@@ -1,0 +1,6 @@
+# Downloaded datasets (tools/baseline/build_baseline.py fetches them again)
+baby-cry-mvp/data/
+__pycache__/
+
+# PlatformIO's object files and library downloads, remade by `atech build`
+baby-cry-mvp/build/.pio/
