@@ -42,9 +42,12 @@ static const uint16_t UI_GREY = 0x9CD3;
 enum UiState { UI_LISTENING, UI_CRY_HEARD, UI_GUESS, UI_GOT_IT, UI_NOT_SAVED, UI_FORGOT };
 static const unsigned long CRY_HEARD_MS = 1500;
 static const unsigned long MESSAGE_MS = 3000;
-static const unsigned long ANSWER_TIMEOUT_MS = 10UL * 60 * 1000;
+static const unsigned long ANSWER_TIMEOUT_MS = 20UL * 1000;   // no answer: back to listening
 static const unsigned long FORGET_HOLD_MS = 3000;
 static const unsigned long LIGHT_MS = 1000;
+static const uint8_t LIGHT_DIM = 6, LIGHT_BRIGHT = 40;
+static const int RECORD_MAX_S = 8;
+static const int RECORD_CHUNK = 240;   // samples per mic_record event
 
 static CryListener cry;
 static CryStore store;
@@ -72,13 +75,19 @@ static void backToListening() {
   setUi(UI_LISTENING);
 }
 
-static void flashLight(NeoPixelGrid& light, uint8_t r, uint8_t g) {
-  greenLight.clear();
+// Each button has its light beside it, always on: green by the yes button,
+// red by the no button. A press makes its light bright for a moment.
+static void showLights(bool greenBright, bool redBright) {
+  greenLight.setBrightness(greenBright ? LIGHT_BRIGHT : LIGHT_DIM);
+  greenLight.setAll(0, 255, 0);
   greenLight.show();
-  redLight.clear();
+  redLight.setBrightness(redBright ? LIGHT_BRIGHT : LIGHT_DIM);
+  redLight.setAll(255, 0, 0);
   redLight.show();
-  light.setAll(r, g, 0);
-  light.show();
+}
+
+static void flashLight(bool green) {
+  showLights(green, !green);
   lightOn = true;
   lightSince = millis();
 }
@@ -92,6 +101,19 @@ static void eventStart(const char* key) {
 }
 
 static void eventEnd() { Serial.println("}}"); }
+
+static void printBase64(const uint8_t* d, int n) {
+  static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  char out[5] = {0};
+  for (int i = 0; i < n; i += 3) {
+    uint32_t v = d[i] << 16 | (i + 1 < n ? d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+    out[0] = B64[v >> 18 & 63];
+    out[1] = B64[v >> 12 & 63];
+    out[2] = i + 1 < n ? B64[v >> 6 & 63] : '=';
+    out[3] = i + 2 < n ? B64[v & 63] : '=';
+    Serial.print(out);
+  }
+}
 
 static void printFloats(const float* v, int n) {
   Serial.print('[');
@@ -148,14 +170,14 @@ static void confirmGuess() {
   printFloats(guessFp, CRY_N_FEATURES);
   Serial.print('}');
   eventEnd();
-  flashLight(greenLight, 0, 255);
+  flashLight(true);
   setUi(UI_GOT_IT);
 }
 
 // Red: show the next most likely need. After all four, nothing is saved.
 static void rejectGuess() {
   rejected |= 1 << shown;
-  flashLight(redLight, 255, 0);
+  flashLight(false);
   shown = bestRemaining();
   if (shown < 0) setUi(UI_NOT_SAVED);
   else uiDirty = true;
@@ -424,10 +446,7 @@ void setup() {
     // ---- user setup ----
     screen.setRotation(1);
     screen.clear();
-    greenLight.clear();
-    greenLight.show();
-    redLight.clear();
-    redLight.show();
+    showLights(false, false);
 
     store.begin();
     cry.begin();
@@ -515,6 +534,7 @@ void loop() {
     static unsigned long bothSince = 0;
     static bool bothReleased = true;
     static int lastHint = 0;
+    static bool recReady = false;
 
     if (cry.pump(ui == UI_LISTENING)) startGuess();
 
@@ -533,6 +553,37 @@ void loop() {
       }
       atechDone();
       cry.skipBacklog();
+    } else if (atech_action == "mic_record") {
+      // Records what the detector hears for N seconds (default 6), then sends
+      // mic_record_end. The laptop then fetches it with mic_record_get <at>, one
+      // chunk per call so a chunk USB garbled can be asked for again, and frees
+      // it with mic_record_free.
+      int secs = atech_value.length() ? atech_value.toInt() : 6;
+      if (secs < 1 || secs > RECORD_MAX_S) {
+        atechFail("seconds must be 1 to 8");
+      } else if (!cry.startRecording(secs * CRY_FS)) {
+        atechFail("not enough memory");
+      } else {
+        recReady = false;
+        atechDone();
+      }
+    } else if (atech_action == "mic_record_get") {
+      int at = atech_value.toInt();
+      if (!recReady || at < 0 || at >= cry.recLen) {
+        atechFail("no recording there");
+      } else {
+        int n = min(RECORD_CHUNK, cry.recLen - at);
+        eventStart("mic_record");
+        Serial.printf("{\"at\":%d,\"n\":%d,\"pcm\":\"", at, n);
+        printBase64((const uint8_t*)(cry.rec + at), n * 2);
+        Serial.print("\"}");
+        eventEnd();
+        atechDone();
+      }
+    } else if (atech_action == "mic_record_free") {
+      cry.stopRecording();
+      recReady = false;
+      atechDone();
     } else if (atech_action == "cries_reset") {
       store.clear();
       lastHungryMs = 0;
@@ -585,11 +636,15 @@ void loop() {
     }
 
     if (lightOn && now - lightSince >= LIGHT_MS) {
-      greenLight.clear();
-      greenLight.show();
-      redLight.clear();
-      redLight.show();
+      showLights(false, false);
       lightOn = false;
+    }
+
+    if (cry.rec && cry.recPos == cry.recLen && !recReady) {
+      recReady = true;
+      eventStart("mic_record_end");
+      Serial.printf("{\"samples\":%d,\"rate\":%d}", cry.recLen, CRY_FS);
+      eventEnd();
     }
 
     if (now - lastDebug >= 250) {

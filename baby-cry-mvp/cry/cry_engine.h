@@ -29,6 +29,29 @@ static void cryOnMic(const int16_t* samples, int count, void*) {
 
 // ---------- live detector ----------
 
+// 200 Hz high-pass (RBJ biquad, Q 0.707) after the decimator. The board's
+// microphone carries a lot of rumble below 100 Hz that hid quieter cries and
+// spoiled the pitch; a cry's pitch is 250 Hz and up, so nothing of it is lost.
+struct CryHighpass {
+  float b0, b1, b2, a1, a2, x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  CryHighpass() {
+    float w0 = 2 * (float)M_PI * 200 / CRY_FS, al = sinf(w0) / (2 * 0.7071f), c = cosf(w0);
+    b0 = (1 + c) / 2 / (1 + al);
+    b1 = -(1 + c) / (1 + al);
+    b2 = b0;
+    a1 = -2 * c / (1 + al);
+    a2 = (1 - al) / (1 + al);
+  }
+  float push(float x) {
+    float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1;
+    x1 = x;
+    y2 = y1;
+    y1 = y;
+    return y;
+  }
+};
+
 // Frames kept: a whole episode plus the silence that ends it.
 #define CRY_HISTORY_FRAMES (CRY_EPISODE_MAX_FRAMES + CRY_EPISODE_GAP_FRAMES + 1)
 
@@ -41,6 +64,24 @@ class CryListener {
   bool floorReady = false;
   int quietFrames = 0;        // frames since the last cry-like one
   uint32_t overruns = 0;      // times the ring filled up before loop read it
+
+  // A recording of what the detector hears (8 kHz, after the decimator), for
+  // tuning it on the laptop: tools/baseline/record_board.py.
+  int16_t* rec = nullptr;
+  int recLen = 0, recPos = 0;
+
+  bool startRecording(int samples) {
+    free(rec);
+    rec = (int16_t*)malloc(samples * sizeof(int16_t));
+    recLen = rec ? samples : 0;
+    recPos = 0;
+    return rec != nullptr;
+  }
+  void stopRecording() {
+    free(rec);
+    rec = nullptr;
+    recLen = recPos = 0;
+  }
 
   void begin() {
     dec.reset();
@@ -61,7 +102,8 @@ class CryListener {
     while (tail != head && frames < maxFrames) {
       float y;
       if (dec.push(cryRing[tail & (CRY_RING - 1)], y)) {
-        frameBuf[fill++] = y;
+        if (recPos < recLen) rec[recPos++] = (int16_t)fmaxf(-32768.0f, fminf(32767.0f, roundf(y)));
+        frameBuf[fill++] = hp.push(y);
         if (fill == CRY_FRAME) {
           fill = 0;
           frames++;
@@ -82,7 +124,7 @@ class CryListener {
 
   // A cry is being heard and its guess is still to come; pauses keep it going.
   // A burst's worth of cry-like frames first, so a single odd frame does not show.
-  bool hearing() const { return episode.open() && episode.cry >= CRY_BURST_MIN_FRAMES; }
+  bool hearing() const { return episode.open() && episode.cry >= CRY_EPISODE_MIN_CRY_FRAMES; }
   // Cry-like frames so far, against the CRY_EPISODE_CRY_FRAMES that give a guess at once.
   int heardFrames() const { return episode.cry; }
 
@@ -92,6 +134,7 @@ class CryListener {
  private:
   uint32_t tail = 0;
   CryDecimator dec;
+  CryHighpass hp;
   float frameBuf[CRY_FRAME];
   int fill = 0;
   CryFrame hist[CRY_HISTORY_FRAMES];

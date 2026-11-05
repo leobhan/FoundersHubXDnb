@@ -32,10 +32,10 @@ LAG_MAX = int(math.ceil(FS / F0_MIN_HZ))    # 32
 OCTAVE_TOL = 0.9                # shortest lag whose peak is within 90 % of the best
 
 # Cry detector
-LOUD_DB = 15.0                  # a frame must be this far above the noise floor
+LOUD_DB = 10.0                  # a frame must be this far above the noise floor
 FLOOR_RISE_DB = 0.01            # per frame (about 0.3 dB/s); the floor falls at once
 FLOOR_INIT_PERCENTILE = 10.0    # clips only: the device starts from its first second
-VOICING_MIN = 0.6
+VOICING_MIN = 0.5
 FLATNESS_MAX = 0.3
 
 # A cry episode starts at the first cry-like frame and survives pauses. It gives
@@ -44,7 +44,7 @@ FLATNESS_MAX = 0.3
 # EPISODE_MIN_CRY_FRAMES. The fingerprint covers the episode up to its last
 # cry-like frame, at most EPISODE_MAX_FRAMES long.
 EPISODE_CRY_FRAMES = 47         # 1.5 s of crying, pauses not counted
-EPISODE_MIN_CRY_FRAMES = 16     # 0.5 s
+EPISODE_MIN_CRY_FRAMES = 6      # 0.2 s
 EPISODE_GAP_FRAMES = 94         # 3 s of silence ends it
 EPISODE_MAX_FRAMES = 188        # 6 s
 BURST_MIN_FRAMES = 4            # cry-like frames in a burst (128 ms)
