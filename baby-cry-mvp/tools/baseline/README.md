@@ -3,7 +3,7 @@
 How the board turns sound into a guess, and where the starting knowledge comes from.
 
 ```
-mic 16 kHz -> decimate to 8 kHz -> 32 ms frames -> cry detector -> episode fingerprint (38 numbers, pauses allowed)
+mic 16 kHz -> decimate to 8 kHz -> 200 Hz high-pass -> 32 ms frames -> cry detector -> episode fingerprint (38 numbers, pauses allowed)
            -> prior x [Donate-a-Cry prototypes + this baby's confirmed cries] -> Hungry / Sleepy / Diaper / Discomfort
 ```
 
@@ -34,7 +34,7 @@ fingerprint, bump `FEATURE_VERSION`, so the board drops cries saved with the old
 
 The full report is at the top of `cry/baseline_cries.h`. In short:
 
-- **Detector:** it fires on 96 % of the Donate-a-Cry clips, and every clip is a cry. On the board
+- **Detector:** it fires on 99 % of the Donate-a-Cry clips, and every clip is a cry. On the board
   the noise floor comes from the room, so this is only a rough guide. Tune it with
   `atech monitor --key cry_debug`.
 - **Need, unseen babies:** 33 % balanced accuracy over Hungry, Sleepy and Discomfort, which is

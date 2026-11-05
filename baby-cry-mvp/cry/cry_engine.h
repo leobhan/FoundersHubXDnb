@@ -29,28 +29,6 @@ static void cryOnMic(const int16_t* samples, int count, void*) {
 
 // ---------- live detector ----------
 
-// 200 Hz high-pass (RBJ biquad, Q 0.707) after the decimator. The board's
-// microphone carries a lot of rumble below 100 Hz that hid quieter cries and
-// spoiled the pitch; a cry's pitch is 250 Hz and up, so nothing of it is lost.
-struct CryHighpass {
-  float b0, b1, b2, a1, a2, x1 = 0, x2 = 0, y1 = 0, y2 = 0;
-  CryHighpass() {
-    float w0 = 2 * (float)M_PI * 200 / CRY_FS, al = sinf(w0) / (2 * 0.7071f), c = cosf(w0);
-    b0 = (1 + c) / 2 / (1 + al);
-    b1 = -(1 + c) / (1 + al);
-    b2 = b0;
-    a1 = -2 * c / (1 + al);
-    a2 = (1 - al) / (1 + al);
-  }
-  float push(float x) {
-    float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-    x2 = x1;
-    x1 = x;
-    y2 = y1;
-    y1 = y;
-    return y;
-  }
-};
 
 // Frames kept: a whole episode plus the silence that ends it.
 #define CRY_HISTORY_FRAMES (CRY_EPISODE_MAX_FRAMES + CRY_EPISODE_GAP_FRAMES + 1)

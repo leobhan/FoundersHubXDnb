@@ -72,6 +72,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "cannot read %s\n", path);
         return 1;
       }
+      CryHighpass hp;
+      for (float& v : x) v = hp.push(v);
       int nf = (int)(x.size() / CRY_FRAME);
       std::vector<CryFrame> frames(nf);
       for (int i = 0; i < nf; i++) cryFrameFeatures(&x[i * CRY_FRAME], frames[i]);

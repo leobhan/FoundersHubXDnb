@@ -66,6 +66,20 @@ struct CryDecimator {
   }
 };
 
+// The high-pass after the decimator (features.py highpass()): the board's
+// microphone rumbles below 100 Hz, and a cry is 250 Hz and up.
+struct CryHighpass {
+  float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  float push(float x) {
+    float y = CRY_HP_B0 * x + CRY_HP_B1 * x1 + CRY_HP_B2 * x2 - CRY_HP_A1 * y1 - CRY_HP_A2 * y2;
+    x2 = x1;
+    x1 = x;
+    y2 = y1;
+    y1 = y;
+    return y;
+  }
+};
+
 // ---------- per-frame features ----------
 
 static float cryHann[CRY_FRAME];
@@ -426,12 +440,13 @@ static int crySelfTest(float* fp) {
   static float buf[CRY_FRAME];
   CryDecimator dec;
   dec.reset();
+  CryHighpass hp;
   uint32_t state = CRY_SELFTEST_SEED;
   int fill = 0, k = 0;
   for (int i = 0; i < nIn; i++) {
     float y;
     if (dec.push(crySelftestSample(i, state), y)) {
-      buf[fill++] = y;
+      buf[fill++] = hp.push(y);
       if (fill == CRY_FRAME) {
         cryFrameFeatures(buf, frames[k++]);
         fill = 0;

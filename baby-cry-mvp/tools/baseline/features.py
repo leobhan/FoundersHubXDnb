@@ -13,7 +13,7 @@ import math
 
 import numpy as np
 
-FEATURE_VERSION = 2
+FEATURE_VERSION = 3
 
 FS_IN = 16000                   # device microphone
 FS = 8000                       # pipeline rate
@@ -24,6 +24,11 @@ BAND_HI_HZ = 3800.0
 
 DECIM_TAPS = 31
 DECIM_CUTOFF_HZ = 3600.0
+
+# High-pass at 8 kHz, before the frames. The board's microphone has strong
+# rumble below 100 Hz that hid cries and spoiled the pitch; a cry is 250 Hz and up.
+HIGHPASS_HZ = 200.0
+HIGHPASS_Q = 0.7071
 
 F0_MIN_HZ = 250.0
 F0_MAX_HZ = 700.0
@@ -85,6 +90,27 @@ def decimate(x16):
     """y[n] = sum_k h[k] x[n-k] with zero history, keeping n = 0, 2, 4, ..."""
     y = np.convolve(np.asarray(x16, dtype=np.float64), decimator_taps())[: len(x16)]
     return y[::2]
+
+
+def highpass_coeffs():
+    """RBJ cookbook high-pass biquad: (b0, b1, b2, a1, a2), a0 = 1."""
+    w0 = 2 * math.pi * HIGHPASS_HZ / FS
+    alpha = math.sin(w0) / (2 * HIGHPASS_Q)
+    c = math.cos(w0)
+    a0 = 1 + alpha
+    return (1 + c) / 2 / a0, -(1 + c) / a0, (1 + c) / 2 / a0, -2 * c / a0, (1 - alpha) / a0
+
+
+def highpass(x8):
+    """The biquad over x8 with zero history (direct form I, as CryHighpass)."""
+    b0, b1, b2, a1, a2 = highpass_coeffs()
+    out = np.empty(len(x8))
+    x1 = x2 = y1 = y2 = 0.0
+    for i, x in enumerate(np.asarray(x8, dtype=np.float64).tolist()):
+        y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        x2, x1, y2, y1 = x1, x, y1, y
+        out[i] = y
+    return out
 
 
 def band_bins():
@@ -307,13 +333,15 @@ def selftest_signal():
 def clip_fingerprint(x8):
     """Fingerprint of a recorded clip at 8 kHz, as the device would take it.
 
+    The clip goes through highpass() first, as audio does on the board.
+
     The noise floor starts at a low percentile of the clip's own frames, since a
     clip has no minutes of room sound before it. The first episode that gives a
     guess is fingerprinted; the end of the clip counts as the baby falling
     silent. Without one, the EPISODE_MAX_FRAMES run with the most cry-like frames
     is used and `triggered` is False. Returns (fingerprint, triggered, cry_fraction_of_clip).
     """
-    x8 = np.asarray(x8, dtype=np.float64)
+    x8 = highpass(x8)
     n = len(x8) // FRAME
     if n < 1:
         raise ValueError("clip shorter than one frame")
