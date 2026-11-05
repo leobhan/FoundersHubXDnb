@@ -2,8 +2,9 @@ name: baby-cry-mvp
 board: 14port
 modules:
   - {id: neopixel, instance: greenLight, port: 1}
+  - {id: button, instance: correctButton, port: 2}
   - {id: st7735_tft, instance: screen, ports: [3, 4]}
-  - {id: button, instance: button, port: 5}
+  - {id: button, instance: wrongButton, port: 5}
   - {id: neopixel, instance: redLight, port: 6}
   - {id: microphone, instance: mic, ports: [13, 14]}
 feedback: false
@@ -22,14 +23,13 @@ code:
     static unsigned long lastDraw = 0;
     static int previousLevelBucket = -1;
 
-    AtechGesture gesture = button.getGesture();
-    if (gesture == GESTURE_TAP) {
+    if (correctButton.wasPressed()) {
       feedbackCorrect++;
       greenLight.setAll(0, 255, 0);
       greenLight.show();
       redLight.clear();
       redLight.show();
-    } else if (gesture == GESTURE_LONG_PRESS) {
+    } else if (wrongButton.wasPressed()) {
       feedbackIncorrect++;
       redLight.setAll(255, 0, 0);
       redLight.show();
